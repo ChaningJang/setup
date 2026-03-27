@@ -4,10 +4,12 @@ One-command setup for new team members.
 
 ## Prerequisites
 
-- A Mac
+- A Mac or Windows PC
 - A GitHub account added to the [IrrationalLabs-team](https://github.com/IrrationalLabs-team) org
 
 ## Install
+
+### macOS
 
 Open Terminal and paste:
 
@@ -15,7 +17,18 @@ Open Terminal and paste:
 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/ChaningJang/setup/main/bootstrap.sh)"
 ```
 
-This installs everything: Homebrew, Git, GitHub CLI, Bun, Claude Code, CLI tools, and clones the project repo.
+### Windows
+
+Open PowerShell and paste:
+
+```powershell
+irm https://raw.githubusercontent.com/ChaningJang/setup/main/bootstrap.ps1 | iex
+```
+
+> If you get an execution policy error, run this first:
+> `Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser`
+
+Both scripts install: Git, GitHub CLI, Bun, Claude Code, CLI tools, and clone the project repo.
 
 ## After setup
 
@@ -25,4 +38,4 @@ cd ~/irrational_labs_hq && claude
 
 ## Re-run to fix issues
 
-The script is safe to run again — it skips anything already installed and repairs what's broken.
+The scripts are safe to run again — they skip anything already installed and repair what's broken.
