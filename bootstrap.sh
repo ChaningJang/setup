@@ -305,24 +305,38 @@ install_project_deps() {
 ensure_claude_code() {
     print_step "Checking Claude Code..."
 
+    # Ensure ~/.local/bin is on PATH for this session
+    export PATH="$HOME/.local/bin:$PATH"
+
     if command_exists claude; then
         print_success "Claude Code already installed"
     else
         print_info "Installing Claude Code..."
         curl -fsSL https://claude.ai/install.sh | bash
 
-        # Source shell profile to pick up new PATH entries
-        if [[ -f "$HOME/.zshrc" ]]; then
-            source "$HOME/.zshrc" 2>/dev/null || true
-        elif [[ -f "$HOME/.bashrc" ]]; then
-            source "$HOME/.bashrc" 2>/dev/null || true
-        fi
+        # Re-add in case the installer overwrote PATH
+        export PATH="$HOME/.local/bin:$PATH"
 
         if command_exists claude; then
             print_success "Claude Code installed"
         else
-            print_warning "Claude Code installed but may need a terminal restart to appear in PATH"
+            print_error "Claude Code installation failed"
+            print_info "Please try manually: curl -fsSL https://claude.ai/install.sh | bash"
+            exit 1
         fi
+    fi
+
+    # Persist ~/.local/bin in shell profile so future terminals find claude
+    local shell_profile="$HOME/.zshrc"
+    [[ -f "$shell_profile" ]] || shell_profile="$HOME/.bash_profile"
+    [[ -f "$shell_profile" ]] || shell_profile="$HOME/.zshrc"  # default to zshrc
+
+    local path_line='export PATH="$HOME/.local/bin:$PATH"'
+    if ! grep -qF '.local/bin' "$shell_profile" 2>/dev/null; then
+        echo "" >> "$shell_profile"
+        echo "# Claude Code" >> "$shell_profile"
+        echo "$path_line" >> "$shell_profile"
+        print_success "Added ~/.local/bin to PATH in $(basename "$shell_profile")"
     fi
 }
 
