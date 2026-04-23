@@ -326,17 +326,46 @@ ensure_claude_code() {
         fi
     fi
 
-    # Persist ~/.local/bin in shell profile so future terminals find claude
-    local shell_profile="$HOME/.zshrc"
-    [[ -f "$shell_profile" ]] || shell_profile="$HOME/.bash_profile"
-    [[ -f "$shell_profile" ]] || shell_profile="$HOME/.zshrc"  # default to zshrc
+    # Persist ~/.local/bin in shell profile(s) so future terminals find claude.
+    # Pick profiles based on $SHELL (not just what files exist) — otherwise a
+    # bash user with a stock ~/.zshrc gets the PATH line written to a file
+    # their shell never sources.
+    local profiles=()
+    case "${SHELL:-}" in
+        */zsh)
+            profiles=("$HOME/.zshrc")
+            ;;
+        */bash)
+            profiles=("$HOME/.bash_profile" "$HOME/.bashrc")
+            ;;
+        *)
+            # Unknown shell — cover the common macOS cases.
+            profiles=("$HOME/.zshrc" "$HOME/.bash_profile")
+            ;;
+    esac
 
     local path_line='export PATH="$HOME/.local/bin:$PATH"'
-    if ! grep -qF '.local/bin' "$shell_profile" 2>/dev/null; then
-        echo "" >> "$shell_profile"
-        echo "# Claude Code" >> "$shell_profile"
-        echo "$path_line" >> "$shell_profile"
-        print_success "Added ~/.local/bin to PATH in $(basename "$shell_profile")"
+    local wrote_any=false
+    for shell_profile in "${profiles[@]}"; do
+        if ! grep -qF '.local/bin' "$shell_profile" 2>/dev/null; then
+            echo "" >> "$shell_profile"
+            echo "# Claude Code" >> "$shell_profile"
+            echo "$path_line" >> "$shell_profile"
+            print_success "Added ~/.local/bin to PATH in $(basename "$shell_profile")"
+            wrote_any=true
+        fi
+    done
+
+    if [[ "$wrote_any" == false ]]; then
+        print_info "~/.local/bin already on PATH in shell profile"
+    fi
+
+    # Final sanity check — fail loudly if claude still isn't resolvable.
+    hash -r 2>/dev/null || true
+    if ! command_exists claude; then
+        print_error "claude installed but not found on PATH"
+        print_info "Open a new terminal, or run: source ${profiles[0]}"
+        exit 1
     fi
 }
 
