@@ -149,6 +149,51 @@ ensure_github_auth() {
     fi
 }
 
+ensure_git_identity() {
+    print_step "Setting up Git commit identity..."
+
+    local current_name current_email
+    current_name=$(git config --global user.name 2>/dev/null || echo "")
+    current_email=$(git config --global user.email 2>/dev/null || echo "")
+
+    # Skip if already set to something sensible.
+    # The "*.local" pattern is the OS default (user@hostname.local) — replace it.
+    if [[ -n "$current_name" && -n "$current_email" && "$current_email" != *.local ]]; then
+        print_success "Git identity already set ($current_name <$current_email>)"
+        return 0
+    fi
+
+    if [[ "$current_email" == *.local ]]; then
+        print_info "Existing email '$current_email' is an OS default — replacing with your GitHub identity"
+    fi
+
+    # Pull name and email from the authenticated GitHub account.
+    local gh_name gh_email gh_login gh_id
+    gh_name=$(gh api user --jq '.name // empty' 2>/dev/null || echo "")
+    gh_email=$(gh api user --jq '.email // empty' 2>/dev/null || echo "")
+    gh_login=$(gh api user --jq '.login // empty' 2>/dev/null || echo "")
+    gh_id=$(gh api user --jq '.id // empty' 2>/dev/null || echo "")
+
+    [[ -z "$gh_name" ]] && gh_name="$gh_login"
+
+    # If the user keeps their email private, GitHub returns null.
+    # Fall back to the privacy-preserving noreply address.
+    if [[ -z "$gh_email" && -n "$gh_id" && -n "$gh_login" ]]; then
+        gh_email="${gh_id}+${gh_login}@users.noreply.github.com"
+        print_info "Your GitHub email is private — using $gh_email"
+    fi
+
+    if [[ -z "$gh_name" || -z "$gh_email" ]]; then
+        print_warning "Could not determine Git identity from GitHub — skipping"
+        print_info "Set manually: git config --global user.email \"you@example.com\""
+        return 0
+    fi
+
+    git config --global user.name "$gh_name"
+    git config --global user.email "$gh_email"
+    print_success "Git identity set to $gh_name <$gh_email>"
+}
+
 setup_repository() {
     print_step "Setting up repository..."
 
@@ -488,6 +533,7 @@ main() {
     ensure_homebrew
     ensure_git_tools
     ensure_github_auth
+    ensure_git_identity
     setup_repository
     ensure_bun
     install_cli_tools

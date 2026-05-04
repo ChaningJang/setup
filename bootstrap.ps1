@@ -154,6 +154,50 @@ function Ensure-GitHubAuth {
     }
 }
 
+function Ensure-GitIdentity {
+    Print-Step "Setting up Git commit identity..."
+
+    $currentName = (git config --global user.name 2>$null)
+    $currentEmail = (git config --global user.email 2>$null)
+
+    # Skip if already set to something sensible.
+    # The "*.local" pattern is the OS default — replace it.
+    if ($currentName -and $currentEmail -and -not ($currentEmail -like "*.local")) {
+        Print-Success "Git identity already set ($currentName <$currentEmail>)"
+        return
+    }
+
+    if ($currentEmail -like "*.local") {
+        Print-Info "Existing email '$currentEmail' is an OS default — replacing with your GitHub identity"
+    }
+
+    $ghUserJson = gh api user 2>$null
+    if (-not $ghUserJson) {
+        Print-Warning "Could not determine Git identity from GitHub — skipping"
+        return
+    }
+
+    $ghUser = $ghUserJson | ConvertFrom-Json
+    $ghName  = if ($ghUser.name) { $ghUser.name } else { $ghUser.login }
+    $ghEmail = $ghUser.email
+
+    # If the user keeps their email private, GitHub returns null.
+    # Fall back to the privacy-preserving noreply address.
+    if (-not $ghEmail) {
+        $ghEmail = "$($ghUser.id)+$($ghUser.login)@users.noreply.github.com"
+        Print-Info "Your GitHub email is private — using $ghEmail"
+    }
+
+    if (-not $ghName -or -not $ghEmail) {
+        Print-Warning "Could not determine Git identity from GitHub — skipping"
+        return
+    }
+
+    git config --global user.name $ghName
+    git config --global user.email $ghEmail
+    Print-Success "Git identity set to $ghName <$ghEmail>"
+}
+
 function Setup-Repository {
     Print-Step "Setting up repository..."
 
@@ -446,6 +490,7 @@ function Main {
     Ensure-Scoop
     Ensure-Git
     Ensure-GitHubAuth
+    Ensure-GitIdentity
     Setup-Repository
     Ensure-Bun
     Install-CliTools
