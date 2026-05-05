@@ -414,6 +414,48 @@ ensure_claude_code() {
     fi
 }
 
+ensure_il_claude_plugins() {
+    print_step "Setting up Irrational Labs Claude Code plugins..."
+
+    local claude_dir="$HOME/.claude"
+    local settings="$claude_dir/settings.json"
+
+    mkdir -p "$claude_dir"
+    [[ -f "$settings" ]] || echo '{}' > "$settings"
+
+    if ! command_exists jq; then
+        print_warning "jq not available — skipping plugin setup"
+        return 0
+    fi
+
+    # Marketplace registration is always (re)set — registering it is the
+    # baseline requirement for everything else here. Per-plugin enabled flags
+    # use |= with a null-check so we only set defaults the FIRST time the
+    # bootstrap runs. If a teammate has explicitly disabled a plugin
+    # (enabledPlugins[...] = false), re-running the bootstrap leaves their
+    # decision intact.
+    local tmp
+    tmp=$(mktemp)
+
+    jq '
+      .extraKnownMarketplaces["irrational-labs-plugins"] = {
+        "source": {
+          "source": "github",
+          "repo": "IrrationalLabs-team/knowledge-work-plugins"
+        }
+      }
+      | .enabledPlugins["gws@irrational-labs-plugins"]          |= (if . == null then true else . end)
+      | .enabledPlugins["il-slides@irrational-labs-plugins"]    |= (if . == null then true else . end)
+      | .enabledPlugins["key-behavior@irrational-labs-plugins"] |= (if . == null then true else . end)
+    ' "$settings" > "$tmp" && mv "$tmp" "$settings"
+
+    print_success "IL plugin marketplace registered"
+    print_info "Default-on: gws, il-slides, key-behavior"
+    print_info "Available on demand: gorilla-scripting, pipedrive"
+    print_info "  install with: /plugin install <name>@irrational-labs-plugins"
+    print_info "(default plugins auto-install on next 'claude' launch)"
+}
+
 setup_git_hooks() {
     print_step "Setting up git hooks..."
 
@@ -539,6 +581,7 @@ main() {
     install_cli_tools
     install_project_deps
     ensure_claude_code
+    ensure_il_claude_plugins
     setup_git_hooks
     setup_secrets
 
