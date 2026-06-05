@@ -242,57 +242,69 @@ ensure_git_identity() {
     print_success "Git identity set to $gh_name <$gh_email>"
 }
 
-setup_repository() {
-    print_step "Setting up repository..."
-
-    if [[ -d "$PROJECT_DIR/.git" ]]; then
-        print_info "Repository already exists at $PROJECT_DIR"
-        cd "$PROJECT_DIR"
-
-        local remote_url
-        remote_url=$(git remote get-url origin 2>/dev/null || echo "")
-
-        if [[ "$remote_url" != *"irrational_labs_hq"* ]]; then
-            print_error "Directory exists but is not the irrational_labs_hq repo!"
-            print_info "Please remove or rename $PROJECT_DIR and re-run this script."
-            exit 1
-        fi
-
-        print_info "Pulling latest changes..."
-        git pull --ff-only || true
-
-        print_info "Verifying LFS files..."
-        repair_lfs_if_needed
+install_shell_helpers() {
+    print_step "Installing shell helpers..."
+    local helpers=("ripgrep" "fd" "bat" "fzf" "git-delta")
+    local to_install=() tool cmd
+    for tool in "${helpers[@]}"; do
+        cmd="$tool"
+        case "$tool" in
+            ripgrep)   cmd="rg" ;;
+            git-delta) cmd="delta" ;;
+        esac
+        command_exists "$cmd" || to_install+=("$tool")
+    done
+    if [[ ${#to_install[@]} -eq 0 ]]; then
+        print_success "Shell helpers already installed"
     else
-        print_info "Cloning repository to $PROJECT_DIR..."
-        mkdir -p "$(dirname "$PROJECT_DIR")"
+        print_info "Installing: ${to_install[*]}"
+        brew install "${to_install[@]}" || print_warning "Some shell helpers failed — continuing"
+        print_success "Shell helpers installed"
+    fi
+}
 
-        gh repo clone "$REPO_URL" "$PROJECT_DIR"
-        cd "$PROJECT_DIR"
-        print_success "Repository cloned successfully"
-
-        repair_lfs_if_needed
+install_hq_extras() {
+    print_step "Installing HQ media/doc tools..."
+    local tools=(
+        "marp-cli" "ghostscript" "ffmpeg" "exiftool" "yt-dlp" "pandoc"
+        "imagemagick" "yq" "miller" "sd" "gawk" "coreutils" "parallel"
+        "trash" "eza"
+    )
+    local to_install=() tool cmd
+    for tool in "${tools[@]}"; do
+        cmd="$tool"
+        case "$tool" in
+            "marp-cli")    cmd="marp" ;;
+            "ghostscript") cmd="gs" ;;
+            "imagemagick") cmd="magick" ;;
+            "coreutils")   cmd="gtimeout" ;;
+            "miller")      cmd="mlr" ;;
+        esac
+        command_exists "$cmd" || to_install+=("$tool")
+    done
+    if [[ ${#to_install[@]} -eq 0 ]]; then
+        print_success "HQ tools already installed"
+    else
+        print_info "Installing: ${to_install[*]}"
+        brew install "${to_install[@]}" || print_warning "Some HQ tools failed — continuing"
+        print_success "HQ tools installed"
     fi
 }
 
 repair_lfs_if_needed() {
+    local dir="$1"
     local needs_repair=false
-    local test_file="$PROJECT_DIR/templates/powerpoint/irrational_labs_powerpoint_template_3.pptx"
-
+    local test_file="$dir/templates/powerpoint/irrational_labs_powerpoint_template_3.pptx"
     if [[ -f "$test_file" ]]; then
-        local file_size
-        file_size=$(stat -f%z "$test_file" 2>/dev/null || echo "0")
-        if [[ "$file_size" -lt "$LFS_MIN_SIZE" ]]; then
-            print_warning "LFS files appear to be pointer files (not downloaded)"
-            needs_repair=true
-        fi
+        local size
+        size=$(stat -f%z "$test_file" 2>/dev/null || echo "0")
+        [[ "$size" -lt "$LFS_MIN_SIZE" ]] && needs_repair=true
     else
         needs_repair=true
     fi
-
     if [[ "$needs_repair" == true ]]; then
         print_info "Downloading LFS files (this may take a few minutes)..."
-        cd "$PROJECT_DIR"
+        cd "$dir"
         git lfs install --local
         git lfs pull
         print_success "LFS files downloaded"
@@ -301,77 +313,117 @@ repair_lfs_if_needed() {
     fi
 }
 
+install_precommit_hook() {
+    local dir="$1"
+    cd "$dir"
+    mkdir -p .git/hooks
+    local hook_file=".git/hooks/pre-commit"
+    cat > "$hook_file" << 'HOOK'
+#!/bin/sh
+PROJECT_ROOT=$(git rev-parse --show-toplevel)
+if ! bun run "$PROJECT_ROOT/scripts/validate_filenames.ts" --staged --quiet; then
+    printf "\n"
+    printf "Commit rejected: One or more filenames contain Windows-incompatible characters.\n"
+    printf "Please rename the files to remove invalid characters before committing.\n"
+    printf "\n"
+    exit 1
+fi
+exit 0
+HOOK
+    chmod +x "$hook_file"
+    print_success "Pre-commit hook installed"
+}
 
-install_cli_tools() {
-    print_step "Installing CLI tools..."
-
-    local core_tools=(
-        "marp-cli"
-        "ghostscript"
-        "ffmpeg"
-        "exiftool"
-        "yt-dlp"
-        "pandoc"
-        "imagemagick"
-        "yq"
-        "jq"
-    )
-
-    local enhanced_tools=(
-        "eza"
-        "fd"
-        "ripgrep"
-        "sd"
-        "gawk"
-        "bat"
-        "coreutils"
-        "fzf"
-        "git-delta"
-        "miller"
-        "parallel"
-        "trash"
-    )
-
-    local all_tools=("${core_tools[@]}" "${enhanced_tools[@]}")
-    local to_install=()
-
-    for tool in "${all_tools[@]}"; do
-        local cmd="$tool"
-        case "$tool" in
-            "marp-cli") cmd="marp" ;;
-            "ghostscript") cmd="gs" ;;
-            "imagemagick") cmd="magick" ;;
-            "ripgrep") cmd="rg" ;;
-            "coreutils") cmd="gtimeout" ;;
-            "git-delta") cmd="delta" ;;
-            "miller") cmd="mlr" ;;
-            "trash") cmd="trash" ;;
-        esac
-
-        if ! command_exists "$cmd"; then
-            to_install+=("$tool")
-        fi
-    done
-
-    if [[ ${#to_install[@]} -eq 0 ]]; then
-        print_success "All CLI tools already installed"
+load_hq_secrets() {
+    local dir="$1"
+    cd "$dir"
+    if [[ -f ".env" ]]; then
+        print_info ".env already exists (run scripts/load_infisical_env.ts --force to refresh)"
     else
-        print_info "Installing: ${to_install[*]}"
-        brew install "${to_install[@]}" || {
-            print_warning "Some tools failed to install — continuing anyway"
-        }
-        print_success "CLI tools installed"
+        print_info "Fetching secrets from Infisical..."
+        if bun run scripts/load_infisical_env.ts; then
+            print_success "Secrets loaded to .env"
+        else
+            WARNINGS+=("HQ: could not load Infisical secrets — ask an admin for access")
+            print_warning "Could not load secrets — continuing"
+        fi
     fi
 }
 
-install_project_deps() {
-    print_step "Installing project dependencies..."
-
-    cd "$PROJECT_DIR"
-
+setup_hq() {
+    local dir="$1"
+    print_step "Running HQ setup..."
+    install_hq_extras
+    repair_lfs_if_needed "$dir"
+    cd "$dir"
     print_info "Running bun install..."
-    bun install
-    print_success "Project dependencies installed"
+    bun install || WARNINGS+=("HQ: bun install failed")
+    install_precommit_hook "$dir"
+    load_hq_secrets "$dir"
+    print_success "HQ setup complete"
+}
+
+setup_generic() {
+    local dir="$1"
+    local base
+    base=$(basename "$dir")
+    print_step "Running generic setup for $base..."
+    cd "$dir"
+    if [[ -f package.json ]]; then
+        print_info "Found package.json — running bun install"
+        bun install || WARNINGS+=("$base: bun install failed")
+    fi
+    if [[ -f .gitattributes ]] && grep -q "filter=lfs" .gitattributes 2>/dev/null; then
+        print_info "Repo uses Git LFS — pulling LFS files"
+        git lfs install --local >/dev/null 2>&1 || true
+        git lfs pull || WARNINGS+=("$base: git lfs pull failed")
+    fi
+    if [[ ! -f .env ]]; then
+        local example=""
+        [[ -f .env.example ]] && example=".env.example"
+        [[ -z "$example" && -f .env.sample ]] && example=".env.sample"
+        if [[ -n "$example" ]]; then
+            cp "$example" .env
+            print_info "Created .env from $example — fill in secrets before use"
+            WARNINGS+=("$base: created .env from $example — needs your secrets")
+        fi
+    fi
+    print_success "$base ready — check its README for any extra setup"
+}
+
+clone_and_setup_repo() {
+    local key="$1"
+    local slug dir setup target
+    slug=$(repo_field "$key" slug)
+    dir=$(repo_field "$key" dir)
+    setup=$(repo_field "$key" setup)
+    target="$HOME/$dir"
+
+    if [[ -z "$slug" ]]; then
+        print_warning "Unknown repo key '$key' — skipping"
+        return 0
+    fi
+
+    print_step "Setting up $slug..."
+
+    if [[ -d "$target/.git" ]]; then
+        print_info "Already cloned at $target — pulling latest"
+        ( cd "$target" && git pull --ff-only ) || true
+    else
+        mkdir -p "$(dirname "$target")"
+        if ! gh repo clone "$slug" "$target"; then
+            WARNINGS+=("Could not clone $slug — check your GitHub access")
+            print_error "Failed to clone $slug (continuing)"
+            return 0
+        fi
+        print_success "Cloned $slug"
+    fi
+
+    case "$setup" in
+        hq)      setup_hq "$target" ;;
+        generic) setup_generic "$target" ;;
+        *)       setup_generic "$target" ;;
+    esac
 }
 
 ensure_claude_code() {
@@ -595,48 +647,6 @@ EOF
     done
 }
 
-setup_git_hooks() {
-    print_step "Setting up git hooks..."
-
-    cd "$PROJECT_DIR"
-    mkdir -p .git/hooks
-
-    local hook_file=".git/hooks/pre-commit"
-    cat > "$hook_file" << 'HOOK'
-#!/bin/sh
-PROJECT_ROOT=$(git rev-parse --show-toplevel)
-if ! bun run "$PROJECT_ROOT/scripts/validate_filenames.ts" --staged --quiet; then
-    printf "\n"
-    printf "Commit rejected: One or more filenames contain Windows-incompatible characters.\n"
-    printf "Please rename the files to remove invalid characters before committing.\n"
-    printf "\n"
-    exit 1
-fi
-exit 0
-HOOK
-    chmod +x "$hook_file"
-    print_success "Pre-commit hook installed"
-}
-
-setup_secrets() {
-    print_step "Setting up API keys and secrets..."
-
-    cd "$PROJECT_DIR"
-
-    if [[ -f ".env" ]]; then
-        print_info ".env file already exists"
-        print_info "Run 'bun run scripts/load_infisical_env.ts --force' to refresh secrets"
-    else
-        print_info "Fetching secrets from Infisical..."
-        if bun run scripts/load_infisical_env.ts; then
-            print_success "Secrets loaded to .env"
-        else
-            print_warning "Could not load secrets — you may not have Infisical access"
-            print_info "Contact Kristen or another admin to get access"
-            print_info "You can still use the project, but some tools will be limited"
-        fi
-    fi
-}
 
 verify_setup() {
     print_step "Verifying setup..."
