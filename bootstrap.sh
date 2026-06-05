@@ -141,27 +141,36 @@ ensure_homebrew() {
     fi
 }
 
-ensure_git_tools() {
-    print_step "Setting up Git and Git LFS..."
+ensure_early_tools() {
+    print_step "Installing core tools (git, git-lfs, gh, jq, bun)..."
 
-    if ! command_exists git; then
-        print_info "Installing git..."
-        brew install git
-    fi
+    command_exists git     || { print_info "Installing git...";     brew install git; }
     print_success "git $(git --version | cut -d' ' -f3)"
 
-    if ! command_exists git-lfs; then
-        print_info "Installing git-lfs..."
-        brew install git-lfs
-    fi
+    command_exists git-lfs || { print_info "Installing git-lfs..."; brew install git-lfs; }
     git lfs install >/dev/null 2>&1
-    print_success "git-lfs $(git lfs version | head -1 | cut -d' ' -f1 | cut -d'/' -f2)"
+    print_success "git-lfs ready"
 
-    if ! command_exists gh; then
-        print_info "Installing GitHub CLI..."
-        brew install gh
-    fi
+    command_exists gh      || { print_info "Installing GitHub CLI..."; brew install gh; }
     print_success "gh $(gh --version | head -1 | cut -d' ' -f3)"
+
+    command_exists jq      || { print_info "Installing jq...";      brew install jq; }
+    print_success "jq ready"
+
+    if command_exists bun; then
+        print_success "bun $(bun --version)"
+    else
+        print_info "Installing Bun..."
+        curl -fsSL https://bun.sh/install | bash
+        export BUN_INSTALL="$HOME/.bun"
+        export PATH="$BUN_INSTALL/bin:$PATH"
+        if command_exists bun; then
+            print_success "bun $(bun --version)"
+        else
+            print_error "Bun installation failed"
+            exit 1
+        fi
+    fi
 }
 
 ensure_github_auth() {
@@ -292,27 +301,6 @@ repair_lfs_if_needed() {
     fi
 }
 
-ensure_bun() {
-    print_step "Checking Bun..."
-
-    if command_exists bun; then
-        print_success "bun $(bun --version)"
-    else
-        print_info "Installing Bun..."
-        curl -fsSL https://bun.sh/install | bash
-
-        export BUN_INSTALL="$HOME/.bun"
-        export PATH="$BUN_INSTALL/bin:$PATH"
-
-        if command_exists bun; then
-            print_success "bun $(bun --version)"
-        else
-            print_error "Bun installation failed"
-            print_info "Please try manually: curl -fsSL https://bun.sh/install | bash"
-            exit 1
-        fi
-    fi
-}
 
 install_cli_tools() {
     print_step "Installing CLI tools..."
@@ -603,35 +591,37 @@ print_completion() {
 # -----------------------------------------------------------------------------
 
 main() {
+    parse_args "$@"
+
     echo ""
-    echo -e "${BOLD}Irrational Labs HQ — Setup${NC}"
-    echo -e "This will install everything you need."
-    echo -e "Takes about 5–10 minutes."
+    echo -e "${BOLD}Irrational Labs — Setup${NC}"
+    echo -e "This will install your dev tools, then ask which repos to clone."
     echo ""
 
     check_macos
     ensure_xcode_cli
     ensure_homebrew
-    ensure_git_tools
-    ensure_github_auth
+    ensure_early_tools          # step 3: git, git-lfs, gh, jq, bun
+    ensure_github_auth          # step 4
     ensure_git_identity
-    setup_repository
-    ensure_bun
-    install_cli_tools
-    install_project_deps
-    ensure_claude_code
+    ensure_claude_code          # step 5: Claude available before anything that can fail
     ensure_il_claude_plugins
-    setup_git_hooks
-    setup_secrets
+    load_manifest               # step 6
+    select_repos
+    install_shell_helpers       # step 7
+
+    if [[ ${#SELECTED_KEYS[@]} -gt 0 ]]; then          # guard: bash 3.2 + set -u
+        local k
+        for k in "${SELECTED_KEYS[@]}"; do
+            clone_and_setup_repo "$k"
+        done
+    else
+        print_info "No repositories selected — base tools only"
+    fi
 
     echo ""
-    if verify_setup; then
-        print_completion
-    else
-        print_warning "Setup completed with some issues"
-        print_info "Try re-running this script or ask for help"
-        print_completion
-    fi
+    verify_setup || print_warning "Setup completed with some issues"
+    print_completion
 }
 
 main "$@"
