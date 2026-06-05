@@ -446,7 +446,7 @@ ensure_claude_code() {
         else
             print_error "Claude Code installation failed"
             print_info "Please try manually: curl -fsSL https://claude.ai/install.sh | bash"
-            exit 1
+            WARNINGS+=("Claude Code install failed — try manually: curl -fsSL https://claude.ai/install.sh | bash")
         fi
     fi
 
@@ -489,7 +489,7 @@ ensure_claude_code() {
     if ! command_exists claude; then
         print_error "claude installed but not found on PATH"
         print_info "Open a new terminal, or run: source ${profiles[0]}"
-        exit 1
+        WARNINGS+=("Claude Code installed but not yet on PATH — open a new terminal to use it")
     fi
 }
 
@@ -721,9 +721,11 @@ main() {
 
     if [[ ${#SELECTED_KEYS[@]} -gt 0 ]]; then          # guard: bash 3.2 + set -u
         local k
+        set +e
         for k in "${SELECTED_KEYS[@]}"; do
             clone_and_setup_repo "$k"
         done
+        set -e
     else
         print_info "No repositories selected — base tools only"
     fi
