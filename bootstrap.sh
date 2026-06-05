@@ -15,9 +15,19 @@ set -euo pipefail
 # -----------------------------------------------------------------------------
 # Configuration
 # -----------------------------------------------------------------------------
-REPO_URL="IrrationalLabs-team/irrational_labs_hq"
-PROJECT_DIR="$HOME/irrational_labs_hq"
+ORG="IrrationalLabs-team"
+SETUP_RAW_BASE="https://raw.githubusercontent.com/ChaningJang/setup/main"
 LFS_MIN_SIZE=1000
+
+# Minimal fallback manifest if repos.json can't be fetched (offline / local run).
+EMBEDDED_REPOS_JSON='{"repos":[{"key":"hq","name":"Irrational Labs HQ","slug":"IrrationalLabs-team/irrational_labs_hq","dir":"irrational_labs_hq","setup":"hq","default":true,"description":"Main workspace"}]}'
+
+# Runtime state
+FLAG_REPOS=""          # comma-separated repo keys, or empty
+FLAG_BASE_ONLY=false
+REPOS_JSON=""          # loaded manifest (string)
+SELECTED_KEYS=()       # repo keys chosen to clone
+WARNINGS=()            # non-fatal issues, reprinted at the end
 
 # Colors
 RED='\033[0;31m'
@@ -36,6 +46,35 @@ print_success() { echo -e "${GREEN}✓ $1${NC}"; }
 print_warning() { echo -e "${YELLOW}⚠ $1${NC}"; }
 print_error()   { echo -e "${RED}✗ $1${NC}"; }
 print_info()    { echo -e "  $1"; }
+
+print_usage() {
+    cat <<USAGE
+Irrational Labs setup
+
+Usage:
+  bootstrap.sh [--repos key1,key2] [--base-only]
+
+Options:
+  --repos LIST   Comma-separated repo keys to clone (skips the menu).
+                 e.g. --repos hq,marketing
+  --base-only    Install base tools only; clone nothing.
+  -h, --help     Show this help.
+
+With no options, an interactive menu asks which repos to clone.
+USAGE
+}
+
+parse_args() {
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --repos)      FLAG_REPOS="${2:-}"; shift 2 ;;
+            --repos=*)    FLAG_REPOS="${1#*=}"; shift ;;
+            --base-only)  FLAG_BASE_ONLY=true; shift ;;
+            -h|--help)    print_usage; exit 0 ;;
+            *)            print_warning "Unknown option: $1"; shift ;;
+        esac
+    done
+}
 
 command_exists() { command -v "$1" &>/dev/null; }
 
