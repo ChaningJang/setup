@@ -342,18 +342,77 @@ function Ensure-ClaudeCode {
         Print-Success "Claude Code already installed"
     } else {
         Print-Info "Installing Claude Code..."
-
-        # Claude Code installs via npm/bun
         bun install -g @anthropic-ai/claude-code 2>$null
         Refresh-Path
+        $bunBin = "$HOME\.bun\bin"
+        if (Test-Path $bunBin) { $env:Path = "$bunBin;$env:Path" }
+    }
 
-        if (Test-CommandExists "claude") {
-            Print-Success "Claude Code installed"
-        } else {
-            Print-Warning "Claude Code installed but may need a terminal restart to appear in PATH"
-            Print-Info "You can also install manually: bun install -g @anthropic-ai/claude-code"
+    # Persist bun global bin on the User PATH so future terminals find claude.
+    $bunBin = "$HOME\.bun\bin"
+    if (Test-Path $bunBin) {
+        $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+        if ($userPath -notlike "*$bunBin*") {
+            [Environment]::SetEnvironmentVariable("Path", "$userPath;$bunBin", "User")
+            Print-Success "Added $bunBin to your PATH"
         }
     }
+
+    Refresh-Path
+    if (Test-CommandExists "claude") {
+        Print-Success "Claude Code ready"
+    } else {
+        Print-Warning "claude installed but not yet on PATH — open a new terminal"
+    }
+}
+
+function Ensure-IlClaudePlugins {
+    Print-Step "Setting up Irrational Labs Claude Code plugins..."
+
+    $claudeDir = "$HOME\.claude"
+    $settingsPath = "$claudeDir\settings.json"
+    if (-not (Test-Path $claudeDir)) { New-Item -ItemType Directory -Path $claudeDir -Force | Out-Null }
+
+    if (Test-Path $settingsPath) {
+        try { $settings = Get-Content -Raw $settingsPath | ConvertFrom-Json }
+        catch { $settings = [PSCustomObject]@{} }
+    } else {
+        $settings = [PSCustomObject]@{}
+    }
+
+    # Helper to ensure a property exists on a PSCustomObject
+    function Ensure-Prop($obj, $name, $value) {
+        if (-not ($obj.PSObject.Properties.Name -contains $name)) {
+            $obj | Add-Member -NotePropertyName $name -NotePropertyValue $value
+        }
+    }
+
+    # Marketplace registration is always (re)set.
+    $marketplace = [PSCustomObject]@{
+        source = [PSCustomObject]@{
+            source = "github"
+            repo   = "IrrationalLabs-team/knowledge-work-plugins"
+        }
+    }
+    Ensure-Prop $settings "extraKnownMarketplaces" ([PSCustomObject]@{})
+    if ($settings.extraKnownMarketplaces.PSObject.Properties.Name -contains "irrational-labs-plugins") {
+        $settings.extraKnownMarketplaces."irrational-labs-plugins" = $marketplace
+    } else {
+        $settings.extraKnownMarketplaces | Add-Member -NotePropertyName "irrational-labs-plugins" -NotePropertyValue $marketplace
+    }
+
+    # Default-on plugins — only set when the key is absent (preserve explicit disables).
+    Ensure-Prop $settings "enabledPlugins" ([PSCustomObject]@{})
+    foreach ($p in @("gws@irrational-labs-plugins","il-slides@irrational-labs-plugins","key-behavior@irrational-labs-plugins")) {
+        if (-not ($settings.enabledPlugins.PSObject.Properties.Name -contains $p)) {
+            $settings.enabledPlugins | Add-Member -NotePropertyName $p -NotePropertyValue $true
+        }
+    }
+
+    $settings | ConvertTo-Json -Depth 12 | Set-Content -Path $settingsPath -Encoding UTF8
+    Print-Success "IL plugin marketplace registered"
+    Print-Info "Default-on: gws, il-slides, key-behavior"
+    Print-Info "Available on demand: gorilla-scripting, pipedrive"
 }
 
 function Setup-GitHooks {
