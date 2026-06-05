@@ -483,6 +483,118 @@ ensure_il_claude_plugins() {
     print_info "(default plugins auto-install on next 'claude' launch)"
 }
 
+load_manifest() {
+    print_step "Loading repo list..."
+    local fetched=""
+    fetched=$(curl -fsSL "$SETUP_RAW_BASE/repos.json" 2>/dev/null || echo "")
+    if [[ -n "$fetched" ]] && echo "$fetched" | jq empty >/dev/null 2>&1; then
+        REPOS_JSON="$fetched"
+        print_success "Repo list loaded"
+    else
+        REPOS_JSON="$EMBEDDED_REPOS_JSON"
+        print_warning "Couldn't fetch repo list — using built-in default (HQ only)"
+    fi
+}
+
+# repo_field <key> <field>  -> prints the field value (empty if not found)
+repo_field() {
+    echo "$REPOS_JSON" | jq -r --arg k "$1" --arg f "$2" \
+        '.repos[] | select(.key==$k) | .[$f] // empty'
+}
+
+all_repo_keys() {
+    echo "$REPOS_JSON" | jq -r '.repos[].key'
+}
+
+select_repos() {
+    SELECTED_KEYS=()
+
+    if [[ "$FLAG_BASE_ONLY" == true ]]; then
+        print_info "Base-only mode — no repositories will be cloned"
+        return 0
+    fi
+
+    # Non-interactive: keys passed via --repos
+    if [[ -n "$FLAG_REPOS" ]]; then
+        local IFS=','
+        local k
+        for k in $FLAG_REPOS; do
+            k=$(echo "$k" | tr -d '[:space:]')
+            [[ -z "$k" ]] && continue
+            if [[ -n "$(repo_field "$k" key)" ]]; then
+                SELECTED_KEYS+=("$k")
+            else
+                print_warning "Unknown repo key '$k' — skipping"
+            fi
+        done
+        return 0
+    fi
+
+    # Interactive: build the access-filtered list
+    print_step "Checking which repos you can access..."
+    local keys=() names=() descs=()
+    local key slug
+    while IFS= read -r key; do
+        [[ -z "$key" ]] && continue
+        slug=$(repo_field "$key" slug)
+        if gh repo view "$slug" >/dev/null 2>&1; then
+            keys+=("$key")
+            names+=("$(repo_field "$key" name)")
+            descs+=("$(repo_field "$key" description)")
+        fi
+    done <<EOF
+$(all_repo_keys)
+EOF
+
+    # Fallback: if access couldn't be verified for anything, show the full list.
+    if [[ ${#keys[@]} -eq 0 ]]; then
+        print_warning "Couldn't verify repo access — showing the full list"
+        while IFS= read -r key; do
+            [[ -z "$key" ]] && continue
+            keys+=("$key")
+            names+=("$(repo_field "$key" name)")
+            descs+=("$(repo_field "$key" description)")
+        done <<EOF
+$(all_repo_keys)
+EOF
+    fi
+
+    # Render the menu to the terminal (stdin is the piped script, so use /dev/tty).
+    {
+        echo ""
+        echo "Which repositories do you want to clone?"
+        local i num
+        for i in "${!keys[@]}"; do
+            num=$((i + 1))
+            printf "  %d) %s — %s\n" "$num" "${names[$i]}" "${descs[$i]}"
+        done
+        echo "  0) None (base tools only)"
+        echo ""
+        printf "Enter numbers separated by spaces or commas (default: 1): "
+    } > /dev/tty
+
+    local answer=""
+    read -r answer < /dev/tty || answer=""
+    [[ -z "$answer" ]] && answer="1"
+    answer="${answer//,/ }"
+
+    local tok idx
+    for tok in $answer; do
+        if [[ "$tok" == "0" ]]; then
+            SELECTED_KEYS=()
+            return 0
+        fi
+        if [[ "$tok" =~ ^[0-9]+$ ]]; then
+            idx=$((tok - 1))
+            if [[ $idx -ge 0 && $idx -lt ${#keys[@]} ]]; then
+                SELECTED_KEYS+=("${keys[$idx]}")
+            else
+                print_warning "Ignoring out-of-range choice: $tok"
+            fi
+        fi
+    done
+}
+
 setup_git_hooks() {
     print_step "Setting up git hooks..."
 
