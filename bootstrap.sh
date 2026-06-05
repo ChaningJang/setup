@@ -650,12 +650,9 @@ EOF
 
 verify_setup() {
     print_step "Verifying setup..."
-
-    cd "$PROJECT_DIR"
-    local all_good=true
-
-    local critical_cmds=("git" "git-lfs" "gh" "bun" "brew")
-    for cmd in "${critical_cmds[@]}"; do
+    local all_good=true cmd
+    local critical=("git" "git-lfs" "gh" "bun" "jq" "brew")
+    for cmd in "${critical[@]}"; do
         if command_exists "$cmd"; then
             print_success "$cmd"
         else
@@ -663,30 +660,12 @@ verify_setup() {
             all_good=false
         fi
     done
-
     if command_exists claude; then
         print_success "claude"
     else
         print_warning "claude not in PATH (may need terminal restart)"
     fi
-
-    local pptx_file="$PROJECT_DIR/templates/powerpoint/irrational_labs_powerpoint_template_3.pptx"
-    if [[ -f "$pptx_file" ]]; then
-        local size
-        size=$(stat -f%z "$pptx_file" 2>/dev/null || echo "0")
-        if [[ "$size" -gt "$LFS_MIN_SIZE" ]]; then
-            print_success "LFS files downloaded correctly"
-        else
-            print_error "LFS files are still pointer files"
-            all_good=false
-        fi
-    fi
-
-    if [[ "$all_good" == true ]]; then
-        return 0
-    else
-        return 1
-    fi
+    [[ "$all_good" == true ]] && return 0 || return 1
 }
 
 print_completion() {
@@ -694,12 +673,20 @@ print_completion() {
     echo -e "${GREEN}${BOLD}════════════════════════════════════════════════════════════${NC}"
     echo -e "${GREEN}${BOLD}  Setup Complete!${NC}"
     echo -e "${GREEN}${BOLD}════════════════════════════════════════════════════════════${NC}"
-    echo ""
-    echo -e "Project location: ${BOLD}$PROJECT_DIR${NC}"
+
+    if [[ ${#WARNINGS[@]} -gt 0 ]]; then
+        echo ""
+        echo -e "${YELLOW}${BOLD}Heads up — a few things need attention:${NC}"
+        local w
+        for w in "${WARNINGS[@]}"; do
+            echo -e "  ${YELLOW}•${NC} $w"
+        done
+    fi
+
     echo ""
     echo -e "${BOLD}Next steps:${NC}"
     echo "  1. Open a new terminal window (to pick up PATH changes)"
-    echo "  2. Run:  cd ~/irrational_labs_hq && claude"
+    echo "  2. cd into a cloned repo and run:  claude"
     echo "  3. Ask Claude: 'Give me a tour of this project'"
     echo ""
     echo -e "${BOLD}If you run into issues:${NC}"
