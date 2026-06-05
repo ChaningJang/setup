@@ -212,127 +212,42 @@ function Ensure-GitIdentity {
     Print-Success "Git identity set to $ghName <$ghEmail>"
 }
 
-function Setup-Repository {
-    Print-Step "Setting up repository..."
-
-    if (Test-Path "$PROJECT_DIR\.git") {
-        Print-Info "Repository already exists at $PROJECT_DIR"
-        Set-Location $PROJECT_DIR
-
-        $remoteUrl = git remote get-url origin 2>$null
-        if ($remoteUrl -notlike "*irrational_labs_hq*") {
-            Print-Error "Directory exists but is not the irrational_labs_hq repo!"
-            Print-Info "Please remove or rename $PROJECT_DIR and re-run this script."
-            throw "Wrong repository in $PROJECT_DIR"
-        }
-
-        Print-Info "Pulling latest changes..."
-        git pull --ff-only 2>$null
-
-        Print-Info "Verifying LFS files..."
-        Repair-LfsIfNeeded
-    } else {
-        Print-Info "Cloning repository to $PROJECT_DIR..."
-
-        gh repo clone $REPO_URL $PROJECT_DIR
-        Set-Location $PROJECT_DIR
-        Print-Success "Repository cloned successfully"
-
-        Repair-LfsIfNeeded
-    }
-}
-
-function Repair-LfsIfNeeded {
-    $needsRepair = $false
-    $testFile = "$PROJECT_DIR\templates\powerpoint\irrational_labs_powerpoint_template_3.pptx"
-
-    if (Test-Path $testFile) {
-        $fileSize = (Get-Item $testFile).Length
-        if ($fileSize -lt $LFS_MIN_SIZE) {
-            Print-Warning "LFS files appear to be pointer files (not downloaded)"
-            $needsRepair = $true
-        }
-    } else {
-        $needsRepair = $true
-    }
-
-    if ($needsRepair) {
-        Print-Info "Downloading LFS files (this may take a few minutes)..."
-        Set-Location $PROJECT_DIR
-        git lfs install --local
-        git lfs pull
+function Repair-LfsIfNeeded($dir) {
+    $testFile = "$dir\templates\powerpoint\irrational_labs_powerpoint_template_3.pptx"
+    $needs = $true
+    if (Test-Path $testFile) { if ((Get-Item $testFile).Length -ge $LFS_MIN_SIZE) { $needs = $false } }
+    if ($needs) {
+        Print-Info "Downloading LFS files..."
+        Set-Location $dir; git lfs install --local; git lfs pull
         Print-Success "LFS files downloaded"
-    } else {
-        Print-Success "LFS files verified"
-    }
+    } else { Print-Success "LFS files verified" }
 }
 
-
-function Install-CliTools {
-    Print-Step "Installing CLI tools..."
-
-    # Tools installed via scoop (best for CLI dev tools)
-    $scoopTools = @{
-        "ffmpeg"     = "ffmpeg"
-        "exiftool"   = "exiftool"
-        "yt-dlp"     = "yt-dlp"
-        "pandoc"     = "pandoc"
-        "imagemagick"= "magick"
-        "yq"         = "yq"
-        "jq"         = "jq"
-        "eza"        = "eza"
-        "fd"         = "fd"
-        "ripgrep"    = "rg"
-        "sd"         = "sd"
-        "bat"        = "bat"
-        "fzf"        = "fzf"
-        "delta"      = "delta"
-        "miller"     = "mlr"
-    }
-
-    $toInstall = @()
-    foreach ($tool in $scoopTools.GetEnumerator()) {
-        if (-not (Test-CommandExists $tool.Value)) {
-            $toInstall += $tool.Key
-        }
-    }
-
-    if ($toInstall.Count -eq 0) {
-        Print-Success "All CLI tools already installed"
-    } else {
-        Print-Info "Installing via scoop: $($toInstall -join ', ')"
-        foreach ($tool in $toInstall) {
-            scoop install $tool 2>$null
-            if ($LASTEXITCODE -ne 0) {
-                Print-Warning "Failed to install $tool — continuing"
-            }
-        }
-        Refresh-Path
-        Print-Success "CLI tools installed"
-    }
-
-    # marp-cli via bun (npm package)
-    if (-not (Test-CommandExists "marp")) {
-        Print-Info "Installing marp-cli..."
-        bun install -g @marp-team/marp-cli 2>$null
-    }
-
-    # ghostscript via winget (better Windows support)
-    if (-not (Test-CommandExists "gswin64c") -and -not (Test-CommandExists "gs")) {
-        Print-Info "Installing Ghostscript..."
-        winget install --id ArtifexSoftware.GhostScript --accept-source-agreements --accept-package-agreements -e 2>$null
-        Refresh-Path
-    }
+function Install-PrecommitHook($dir) {
+    Set-Location $dir
+    if (-not (Test-Path ".git\hooks")) { New-Item -ItemType Directory -Path ".git\hooks" -Force | Out-Null }
+    $hook = @'
+#!/bin/sh
+PROJECT_ROOT=$(git rev-parse --show-toplevel)
+if ! bun run "$PROJECT_ROOT/scripts/validate_filenames.ts" --staged --quiet; then
+    printf "\nCommit rejected: filenames contain Windows-incompatible characters.\n\n"
+    exit 1
+fi
+exit 0
+'@
+    Set-Content -Path ".git\hooks\pre-commit" -Value $hook -NoNewline
+    Print-Success "Pre-commit hook installed"
 }
 
-function Install-ProjectDeps {
-    Print-Step "Installing project dependencies..."
-
-    Set-Location $PROJECT_DIR
-
-    Print-Info "Running bun install..."
-    bun install
-    Print-Success "Project dependencies installed"
+function Load-HqSecrets($dir) {
+    Set-Location $dir
+    if (Test-Path ".env") {
+        Print-Info ".env already exists"
+    } else {
+        Print-Info "Fetching secrets from Infisical..."
+        try { bun run scripts/load_infisical_env.ts; Print-Success "Secrets loaded to .env" }
+        catch { $script:Warnings += "HQ: could not load Infisical secrets — ask an admin"; Print-Warning "Could not load secrets" }
+    }
 }
 
 function Ensure-ClaudeCode {
@@ -418,92 +333,181 @@ function Ensure-IlClaudePlugins {
     Print-Info "Available on demand: gorilla-scripting, pipedrive"
 }
 
-function Setup-GitHooks {
-    Print-Step "Setting up git hooks..."
-
-    Set-Location $PROJECT_DIR
-    $hooksDir = ".git\hooks"
-    if (-not (Test-Path $hooksDir)) {
-        New-Item -ItemType Directory -Path $hooksDir -Force | Out-Null
+function Load-Manifest {
+    Print-Step "Loading repo list..."
+    $fetched = $null
+    try { $fetched = Invoke-RestMethod -Uri "$SETUP_RAW_BASE/repos.json" -ErrorAction Stop } catch { $fetched = $null }
+    if ($fetched -and $fetched.repos) {
+        $script:ReposJson = $fetched
+        Print-Success "Repo list loaded"
+    } else {
+        $script:ReposJson = ($EMBEDDED_REPOS_JSON | ConvertFrom-Json)
+        Print-Warning "Couldn't fetch repo list — using built-in default (HQ only)"
     }
-
-    # Write a shell hook (Git for Windows uses bash for hooks)
-    $hookContent = @'
-#!/bin/sh
-PROJECT_ROOT=$(git rev-parse --show-toplevel)
-if ! bun run "$PROJECT_ROOT/scripts/validate_filenames.ts" --staged --quiet; then
-    printf "\n"
-    printf "Commit rejected: One or more filenames contain Windows-incompatible characters.\n"
-    printf "Please rename the files to remove invalid characters before committing.\n"
-    printf "\n"
-    exit 1
-fi
-exit 0
-'@
-    Set-Content -Path "$hooksDir\pre-commit" -Value $hookContent -NoNewline
-    Print-Success "Pre-commit hook installed"
 }
 
-function Setup-Secrets {
-    Print-Step "Setting up API keys and secrets..."
+function Get-RepoEntry($key) {
+    return $script:ReposJson.repos | Where-Object { $_.key -eq $key } | Select-Object -First 1
+}
 
-    Set-Location $PROJECT_DIR
+function Select-Repos {
+    $script:SelectedKeys = @()
 
-    if (Test-Path ".env") {
-        Print-Info ".env file already exists"
-        Print-Info "Run 'bun run scripts/load_infisical_env.ts --force' to refresh secrets"
-    } else {
-        Print-Info "Fetching secrets from Infisical..."
-        try {
-            bun run scripts/load_infisical_env.ts
-            Print-Success "Secrets loaded to .env"
-        } catch {
-            Print-Warning "Could not load secrets — you may not have Infisical access"
-            Print-Info "Contact Kristen or another admin to get access"
-            Print-Info "You can still use the project, but some tools will be limited"
+    if ($BaseOnly) {
+        Print-Info "Base-only mode — no repositories will be cloned"
+        return
+    }
+
+    if ($Repos) {
+        foreach ($k in ($Repos -split ",")) {
+            $k = $k.Trim()
+            if (-not $k) { continue }
+            if (Get-RepoEntry $k) { $script:SelectedKeys += $k }
+            else { Print-Warning "Unknown repo key '$k' — skipping" }
         }
+        return
+    }
+
+    Print-Step "Checking which repos you can access..."
+    $accessible = @()
+    foreach ($r in $script:ReposJson.repos) {
+        gh repo view $r.slug *> $null
+        if ($LASTEXITCODE -eq 0) { $accessible += $r }
+    }
+    if ($accessible.Count -eq 0) {
+        Print-Warning "Couldn't verify repo access — showing the full list"
+        $accessible = $script:ReposJson.repos
+    }
+
+    Write-Host ""
+    Write-Host "Which repositories do you want to clone?"
+    for ($i = 0; $i -lt $accessible.Count; $i++) {
+        $n = $i + 1
+        Write-Host ("  {0}) {1} — {2}" -f $n, $accessible[$i].name, $accessible[$i].description)
+    }
+    Write-Host "  0) None (base tools only)"
+    Write-Host ""
+    $answer = Read-Host "Enter numbers separated by spaces or commas (default: 1)"
+    if (-not $answer) { $answer = "1" }
+    $answer = $answer -replace ",", " "
+
+    foreach ($tok in ($answer -split "\s+")) {
+        if (-not $tok) { continue }
+        if ($tok -eq "0") { $script:SelectedKeys = @(); return }
+        if ($tok -match '^\d+$') {
+            $idx = [int]$tok - 1
+            if ($idx -ge 0 -and $idx -lt $accessible.Count) {
+                $script:SelectedKeys += $accessible[$idx].key
+            } else {
+                Print-Warning "Ignoring out-of-range choice: $tok"
+            }
+        }
+    }
+}
+
+function Install-ShellHelpers {
+    Print-Step "Installing shell helpers..."
+    $helpers = @{ "ripgrep" = "rg"; "fd" = "fd"; "bat" = "bat"; "fzf" = "fzf"; "delta" = "delta" }
+    foreach ($h in $helpers.GetEnumerator()) {
+        if (-not (Test-CommandExists $h.Value)) {
+            scoop install $h.Key 2>$null
+        }
+    }
+    Refresh-Path
+    Print-Success "Shell helpers installed"
+}
+
+function Install-HqExtras {
+    Print-Step "Installing HQ media/doc tools..."
+    $scoopTools = @{
+        "ffmpeg"="ffmpeg"; "exiftool"="exiftool"; "yt-dlp"="yt-dlp"; "pandoc"="pandoc";
+        "imagemagick"="magick"; "yq"="yq"; "miller"="mlr"; "sd"="sd"; "gawk"="gawk"; "eza"="eza"
+    }
+    foreach ($t in $scoopTools.GetEnumerator()) {
+        if (-not (Test-CommandExists $t.Value)) { scoop install $t.Key 2>$null }
+    }
+    Refresh-Path
+    if (-not (Test-CommandExists "marp")) { bun install -g @marp-team/marp-cli 2>$null }
+    if (-not (Test-CommandExists "gswin64c") -and -not (Test-CommandExists "gs")) {
+        winget install --id ArtifexSoftware.GhostScript --accept-source-agreements --accept-package-agreements -e 2>$null
+        Refresh-Path
+    }
+    Print-Success "HQ tools installed"
+}
+
+function Setup-Hq($dir) {
+    Print-Step "Running HQ setup..."
+    Install-HqExtras
+    Repair-LfsIfNeeded $dir
+    Set-Location $dir
+    bun install
+    Install-PrecommitHook $dir
+    Load-HqSecrets $dir
+    Print-Success "HQ setup complete"
+}
+
+function Setup-Generic($dir) {
+    $base = Split-Path $dir -Leaf
+    Print-Step "Running generic setup for $base..."
+    Set-Location $dir
+    if (Test-Path "package.json") {
+        Print-Info "Found package.json — running bun install"
+        try { bun install } catch { $script:Warnings += "$base: bun install failed" }
+    }
+    if ((Test-Path ".gitattributes") -and (Select-String -Path ".gitattributes" -Pattern "filter=lfs" -Quiet)) {
+        Print-Info "Repo uses Git LFS — pulling LFS files"
+        git lfs install --local 2>$null | Out-Null
+        git lfs pull
+    }
+    if (-not (Test-Path ".env")) {
+        $example = $null
+        if (Test-Path ".env.example") { $example = ".env.example" }
+        elseif (Test-Path ".env.sample") { $example = ".env.sample" }
+        if ($example) {
+            Copy-Item $example ".env"
+            Print-Info "Created .env from $example — fill in secrets before use"
+            $script:Warnings += "$base: created .env from $example — needs your secrets"
+        }
+    }
+    Print-Success "$base ready — check its README for any extra setup"
+}
+
+function Clone-AndSetupRepo($key) {
+    $entry = Get-RepoEntry $key
+    if (-not $entry) { Print-Warning "Unknown repo key '$key' — skipping"; return }
+    $target = "$HOME\$($entry.dir)"
+    Print-Step "Setting up $($entry.slug)..."
+
+    if (Test-Path "$target\.git") {
+        Print-Info "Already cloned — pulling latest"
+        Set-Location $target; git pull --ff-only 2>$null
+    } else {
+        gh repo clone $entry.slug $target
+        if ($LASTEXITCODE -ne 0) {
+            $script:Warnings += "Could not clone $($entry.slug) — check your GitHub access"
+            Print-Error "Failed to clone $($entry.slug) (continuing)"
+            return
+        }
+        Print-Success "Cloned $($entry.slug)"
+    }
+
+    switch ($entry.setup) {
+        "hq"      { Setup-Hq $target }
+        "generic" { Setup-Generic $target }
+        default   { Setup-Generic $target }
     }
 }
 
 function Verify-Setup {
     Print-Step "Verifying setup..."
-
-    Set-Location $PROJECT_DIR
     $allGood = $true
-
-    $criticalCmds = @("git", "git-lfs", "gh", "bun")
+    $criticalCmds = @("git", "git-lfs", "gh", "bun", "jq")
     foreach ($cmd in $criticalCmds) {
-        if (Test-CommandExists $cmd) {
-            Print-Success $cmd
-        } else {
-            Print-Error "$cmd not found"
-            $allGood = $false
-        }
+        if (Test-CommandExists $cmd) { Print-Success $cmd }
+        else { Print-Error "$cmd not found"; $allGood = $false }
     }
-
-    if (Test-CommandExists "scoop") {
-        Print-Success "scoop"
-    } else {
-        Print-Warning "scoop not in PATH"
-    }
-
-    if (Test-CommandExists "claude") {
-        Print-Success "claude"
-    } else {
-        Print-Warning "claude not in PATH (may need terminal restart)"
-    }
-
-    $pptxFile = "$PROJECT_DIR\templates\powerpoint\irrational_labs_powerpoint_template_3.pptx"
-    if (Test-Path $pptxFile) {
-        $size = (Get-Item $pptxFile).Length
-        if ($size -gt $LFS_MIN_SIZE) {
-            Print-Success "LFS files downloaded correctly"
-        } else {
-            Print-Error "LFS files are still pointer files"
-            $allGood = $false
-        }
-    }
-
+    if (Test-CommandExists "scoop") { Print-Success "scoop" } else { Print-Warning "scoop not in PATH" }
+    if (Test-CommandExists "claude") { Print-Success "claude" } else { Print-Warning "claude not in PATH (may need terminal restart)" }
     return $allGood
 }
 
@@ -512,12 +516,17 @@ function Print-Completion {
     Write-Host "════════════════════════════════════════════════════════════" -ForegroundColor Green
     Write-Host "  Setup Complete!" -ForegroundColor Green
     Write-Host "════════════════════════════════════════════════════════════" -ForegroundColor Green
+
+    if ($script:Warnings.Count -gt 0) {
+        Write-Host ""
+        Write-Host "Heads up — a few things need attention:" -ForegroundColor Yellow
+        foreach ($w in $script:Warnings) { Write-Host "  • $w" -ForegroundColor Yellow }
+    }
+
     Write-Host ""
-    Write-Host "Project location: $PROJECT_DIR"
-    Write-Host ""
-    Write-Host "Next steps:" -NoNewline; Write-Host ""
+    Write-Host "Next steps:"
     Write-Host "  1. Open a new terminal window (to pick up PATH changes)"
-    Write-Host "  2. Run:  cd ~\irrational_labs_hq; claude"
+    Write-Host "  2. cd into a cloned repo and run:  claude"
     Write-Host "  3. Ask Claude: 'Give me a tour of this project'"
     Write-Host ""
     Write-Host "If you run into issues:"
