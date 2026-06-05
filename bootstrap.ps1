@@ -409,7 +409,10 @@ function Ensure-IlClaudePlugins {
         }
     }
 
-    $settings | ConvertTo-Json -Depth 12 | Set-Content -Path $settingsPath -Encoding UTF8
+    # Write BOM-free UTF-8 (Set-Content -Encoding UTF8 emits a BOM on Windows
+    # PowerShell 5.1, which can break JSON parsers reading settings.json).
+    $json = $settings | ConvertTo-Json -Depth 12
+    [System.IO.File]::WriteAllText($settingsPath, $json, (New-Object System.Text.UTF8Encoding($false)))
     Print-Success "IL plugin marketplace registered"
     Print-Info "Default-on: gws, il-slides, key-behavior"
     Print-Info "Available on demand: gorilla-scripting, pipedrive"
