@@ -278,6 +278,7 @@ function Ensure-ClaudeCode {
         Print-Success "Claude Code ready"
     } else {
         Print-Warning "claude installed but not yet on PATH — open a new terminal"
+        $script:Warnings += "Claude Code installed but not yet on PATH — open a new terminal to use it"
     }
 }
 
@@ -441,6 +442,7 @@ function Setup-Hq($dir) {
     Repair-LfsIfNeeded $dir
     Set-Location $dir
     bun install
+    if ($LASTEXITCODE -ne 0) { $script:Warnings += "HQ: bun install failed" }
     Install-PrecommitHook $dir
     Load-HqSecrets $dir
     Print-Success "HQ setup complete"
@@ -458,6 +460,7 @@ function Setup-Generic($dir) {
         Print-Info "Repo uses Git LFS — pulling LFS files"
         git lfs install --local 2>$null | Out-Null
         git lfs pull
+        if ($LASTEXITCODE -ne 0) { $script:Warnings += "$base: git lfs pull failed" }
     }
     if (-not (Test-Path ".env")) {
         $example = $null
@@ -557,7 +560,10 @@ function Main {
     Install-ShellHelpers       # step 7
 
     if ($script:SelectedKeys.Count -gt 0) {
-        foreach ($k in $script:SelectedKeys) { Clone-AndSetupRepo $k }
+        foreach ($k in $script:SelectedKeys) {
+            try { Clone-AndSetupRepo $k }
+            catch { $script:Warnings += "${k}: setup hit an error — $($_.Exception.Message)" }
+        }
     } else {
         Print-Info "No repositories selected — base tools only"
     }
