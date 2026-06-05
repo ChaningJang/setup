@@ -9,14 +9,24 @@
 # This script is idempotent — safe to re-run to fix problems.
 # =============================================================================
 
+param(
+    [string]$Repos = "",       # comma-separated repo keys
+    [switch]$BaseOnly
+)
+
 $ErrorActionPreference = "Stop"
 
 # -----------------------------------------------------------------------------
 # Configuration
 # -----------------------------------------------------------------------------
-$REPO_URL = "IrrationalLabs-team/irrational_labs_hq"
-$PROJECT_DIR = "$HOME\irrational_labs_hq"
-$LFS_MIN_SIZE = 1000
+$ORG            = "IrrationalLabs-team"
+$SETUP_RAW_BASE = "https://raw.githubusercontent.com/ChaningJang/setup/main"
+$LFS_MIN_SIZE   = 1000
+$EMBEDDED_REPOS_JSON = '{"repos":[{"key":"hq","name":"Irrational Labs HQ","slug":"IrrationalLabs-team/irrational_labs_hq","dir":"irrational_labs_hq","setup":"hq","default":true,"description":"Main workspace"}]}'
+
+$script:ReposJson    = $null
+$script:SelectedKeys = @()
+$script:Warnings     = @()
 
 # -----------------------------------------------------------------------------
 # Helper Functions
@@ -85,42 +95,46 @@ function Ensure-Scoop {
     }
 }
 
-function Ensure-Git {
-    Print-Step "Setting up Git and Git LFS..."
+function Ensure-EarlyTools {
+    Print-Step "Installing core tools (git, git-lfs, gh, jq, bun)..."
 
     if (-not (Test-CommandExists "git")) {
-        Print-Info "Installing Git..."
         winget install --id Git.Git --accept-source-agreements --accept-package-agreements -e
         Refresh-Path
     }
-    if (Test-CommandExists "git") {
-        Print-Success "git $(git --version)"
-    } else {
-        Print-Error "Git installation failed"
-        throw "Git is required to continue"
-    }
+    if (Test-CommandExists "git") { Print-Success "git $(git --version)" }
+    else { Print-Error "Git installation failed"; throw "Git is required" }
 
     if (-not (Test-CommandExists "git-lfs")) {
-        Print-Info "Installing Git LFS..."
         winget install --id GitHub.GitLFS --accept-source-agreements --accept-package-agreements -e
         Refresh-Path
     }
     git lfs install 2>$null | Out-Null
-    if (Test-CommandExists "git-lfs") {
-        Print-Success "git-lfs installed"
-    } else {
-        Print-Warning "git-lfs may need a terminal restart to appear in PATH"
-    }
+    Print-Success "git-lfs ready"
 
     if (-not (Test-CommandExists "gh")) {
-        Print-Info "Installing GitHub CLI..."
         winget install --id GitHub.cli --accept-source-agreements --accept-package-agreements -e
         Refresh-Path
     }
-    if (Test-CommandExists "gh") {
-        Print-Success "gh $(gh --version | Select-Object -First 1)"
+    if (Test-CommandExists "gh") { Print-Success "gh installed" }
+    else { Print-Warning "gh may need a terminal restart" }
+
+    if (-not (Test-CommandExists "jq")) {
+        scoop install jq 2>$null
+        Refresh-Path
+    }
+    Print-Success "jq ready"
+
+    if (Test-CommandExists "bun") {
+        Print-Success "bun $(bun --version)"
     } else {
-        Print-Warning "GitHub CLI may need a terminal restart to appear in PATH"
+        Print-Info "Installing Bun..."
+        powershell -c "irm bun.sh/install.ps1 | iex"
+        Refresh-Path
+        $bunPath = "$HOME\.bun\bin"
+        if (Test-Path $bunPath) { $env:Path = "$bunPath;$env:Path" }
+        if (Test-CommandExists "bun") { Print-Success "bun $(bun --version)" }
+        else { Print-Error "Bun installation failed"; throw "Bun is required" }
     }
 }
 
@@ -253,31 +267,6 @@ function Repair-LfsIfNeeded {
     }
 }
 
-function Ensure-Bun {
-    Print-Step "Checking Bun..."
-
-    if (Test-CommandExists "bun") {
-        Print-Success "bun $(bun --version)"
-    } else {
-        Print-Info "Installing Bun..."
-        powershell -c "irm bun.sh/install.ps1 | iex"
-        Refresh-Path
-
-        # Also add to current session
-        $bunPath = "$HOME\.bun\bin"
-        if (Test-Path $bunPath) {
-            $env:Path = "$bunPath;$env:Path"
-        }
-
-        if (Test-CommandExists "bun") {
-            Print-Success "bun $(bun --version)"
-        } else {
-            Print-Error "Bun installation failed"
-            Print-Info "Please try manually: powershell -c 'irm bun.sh/install.ps1 | iex'"
-            throw "Bun is required to continue"
-        }
-    }
-}
 
 function Install-CliTools {
     Print-Step "Installing CLI tools..."
@@ -481,32 +470,30 @@ function Print-Completion {
 
 function Main {
     Write-Host ""
-    Write-Host "Irrational Labs HQ — Setup (Windows)" -ForegroundColor White
-    Write-Host "This will install everything you need."
-    Write-Host "Takes about 5–10 minutes."
+    Write-Host "Irrational Labs — Setup (Windows)" -ForegroundColor White
+    Write-Host "This will install your dev tools, then ask which repos to clone."
     Write-Host ""
 
     Ensure-Winget
     Ensure-Scoop
-    Ensure-Git
-    Ensure-GitHubAuth
+    Ensure-EarlyTools          # step 3
+    Ensure-GitHubAuth          # step 4
     Ensure-GitIdentity
-    Setup-Repository
-    Ensure-Bun
-    Install-CliTools
-    Install-ProjectDeps
-    Ensure-ClaudeCode
-    Setup-GitHooks
-    Setup-Secrets
+    Ensure-ClaudeCode          # step 5 (moved up; hardened in Task 8)
+    Ensure-IlClaudePlugins     # step 5 (new in Task 8)
+    Load-Manifest              # step 6
+    Select-Repos
+    Install-ShellHelpers       # step 7
+
+    if ($script:SelectedKeys.Count -gt 0) {
+        foreach ($k in $script:SelectedKeys) { Clone-AndSetupRepo $k }
+    } else {
+        Print-Info "No repositories selected — base tools only"
+    }
 
     Write-Host ""
-    if (Verify-Setup) {
-        Print-Completion
-    } else {
-        Print-Warning "Setup completed with some issues"
-        Print-Info "Try re-running this script or ask for help"
-        Print-Completion
-    }
+    if (-not (Verify-Setup)) { Print-Warning "Setup completed with some issues" }
+    Print-Completion
 }
 
 Main
