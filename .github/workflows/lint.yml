@@ -1,0 +1,17 @@
+name: lint
+on: [push, pull_request]
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate repos.json
+        run: jq empty repos.json && jq -e '.repos | length > 0' repos.json
+      - name: ShellCheck bootstrap.sh
+        run: sudo apt-get update && sudo apt-get install -y shellcheck && shellcheck -S warning bootstrap.sh
+      - name: PSScriptAnalyzer bootstrap.ps1
+        shell: pwsh
+        run: |
+          Install-Module PSScriptAnalyzer -Force -Scope CurrentUser
+          $r = Invoke-ScriptAnalyzer -Path bootstrap.ps1 -Severity Error
+          if ($r) { $r | Format-Table; exit 1 }
