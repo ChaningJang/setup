@@ -15,9 +15,18 @@ set -euo pipefail
 # -----------------------------------------------------------------------------
 # Configuration
 # -----------------------------------------------------------------------------
-REPO_URL="IrrationalLabs-team/irrational_labs_hq"
-PROJECT_DIR="$HOME/irrational_labs_hq"
+SETUP_RAW_BASE="https://raw.githubusercontent.com/ChaningJang/setup/main"
 LFS_MIN_SIZE=1000
+
+# Minimal fallback manifest if repos.json can't be fetched (offline / local run).
+EMBEDDED_REPOS_JSON='{"repos":[{"key":"hq","name":"Irrational Labs HQ","slug":"IrrationalLabs-team/irrational_labs_hq","dir":"irrational_labs_hq","setup":"hq","default":true,"description":"Main workspace"}]}'
+
+# Runtime state
+FLAG_REPOS=""          # comma-separated repo keys, or empty
+FLAG_BASE_ONLY=false
+REPOS_JSON=""          # loaded manifest (string)
+SELECTED_KEYS=()       # repo keys chosen to clone
+WARNINGS=()            # non-fatal issues, reprinted at the end
 
 # Colors
 RED='\033[0;31m'
@@ -36,6 +45,35 @@ print_success() { echo -e "${GREEN}✓ $1${NC}"; }
 print_warning() { echo -e "${YELLOW}⚠ $1${NC}"; }
 print_error()   { echo -e "${RED}✗ $1${NC}"; }
 print_info()    { echo -e "  $1"; }
+
+print_usage() {
+    cat <<USAGE
+Irrational Labs setup
+
+Usage:
+  bootstrap.sh [--repos key1,key2] [--base-only]
+
+Options:
+  --repos LIST   Comma-separated repo keys to clone (skips the menu).
+                 e.g. --repos hq,marketing
+  --base-only    Install base tools only; clone nothing.
+  -h, --help     Show this help.
+
+With no options, an interactive menu asks which repos to clone.
+USAGE
+}
+
+parse_args() {
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --repos)      FLAG_REPOS="${2:-}"; shift 2 ;;
+            --repos=*)    FLAG_REPOS="${1#*=}"; shift ;;
+            --base-only)  FLAG_BASE_ONLY=true; shift ;;
+            -h|--help)    print_usage; exit 0 ;;
+            *)            print_warning "Unknown option: $1"; shift ;;
+        esac
+    done
+}
 
 command_exists() { command -v "$1" &>/dev/null; }
 
@@ -102,27 +140,36 @@ ensure_homebrew() {
     fi
 }
 
-ensure_git_tools() {
-    print_step "Setting up Git and Git LFS..."
+ensure_early_tools() {
+    print_step "Installing core tools (git, git-lfs, gh, jq, bun)..."
 
-    if ! command_exists git; then
-        print_info "Installing git..."
-        brew install git
-    fi
+    command_exists git     || { print_info "Installing git...";     brew install git; }
     print_success "git $(git --version | cut -d' ' -f3)"
 
-    if ! command_exists git-lfs; then
-        print_info "Installing git-lfs..."
-        brew install git-lfs
-    fi
+    command_exists git-lfs || { print_info "Installing git-lfs..."; brew install git-lfs; }
     git lfs install >/dev/null 2>&1
-    print_success "git-lfs $(git lfs version | head -1 | cut -d' ' -f1 | cut -d'/' -f2)"
+    print_success "git-lfs ready"
 
-    if ! command_exists gh; then
-        print_info "Installing GitHub CLI..."
-        brew install gh
-    fi
+    command_exists gh      || { print_info "Installing GitHub CLI..."; brew install gh; }
     print_success "gh $(gh --version | head -1 | cut -d' ' -f3)"
+
+    command_exists jq      || { print_info "Installing jq...";      brew install jq; }
+    print_success "jq ready"
+
+    if command_exists bun; then
+        print_success "bun $(bun --version)"
+    else
+        print_info "Installing Bun..."
+        curl -fsSL https://bun.sh/install | bash
+        export BUN_INSTALL="$HOME/.bun"
+        export PATH="$BUN_INSTALL/bin:$PATH"
+        if command_exists bun; then
+            print_success "bun $(bun --version)"
+        else
+            print_error "Bun installation failed"
+            exit 1
+        fi
+    fi
 }
 
 ensure_github_auth() {
@@ -194,57 +241,69 @@ ensure_git_identity() {
     print_success "Git identity set to $gh_name <$gh_email>"
 }
 
-setup_repository() {
-    print_step "Setting up repository..."
-
-    if [[ -d "$PROJECT_DIR/.git" ]]; then
-        print_info "Repository already exists at $PROJECT_DIR"
-        cd "$PROJECT_DIR"
-
-        local remote_url
-        remote_url=$(git remote get-url origin 2>/dev/null || echo "")
-
-        if [[ "$remote_url" != *"irrational_labs_hq"* ]]; then
-            print_error "Directory exists but is not the irrational_labs_hq repo!"
-            print_info "Please remove or rename $PROJECT_DIR and re-run this script."
-            exit 1
-        fi
-
-        print_info "Pulling latest changes..."
-        git pull --ff-only || true
-
-        print_info "Verifying LFS files..."
-        repair_lfs_if_needed
+install_shell_helpers() {
+    print_step "Installing shell helpers..."
+    local helpers=("ripgrep" "fd" "bat" "fzf" "git-delta")
+    local to_install=() tool cmd
+    for tool in "${helpers[@]}"; do
+        cmd="$tool"
+        case "$tool" in
+            ripgrep)   cmd="rg" ;;
+            git-delta) cmd="delta" ;;
+        esac
+        command_exists "$cmd" || to_install+=("$tool")
+    done
+    if [[ ${#to_install[@]} -eq 0 ]]; then
+        print_success "Shell helpers already installed"
     else
-        print_info "Cloning repository to $PROJECT_DIR..."
-        mkdir -p "$(dirname "$PROJECT_DIR")"
+        print_info "Installing: ${to_install[*]}"
+        brew install "${to_install[@]}" || print_warning "Some shell helpers failed — continuing"
+        print_success "Shell helpers installed"
+    fi
+}
 
-        gh repo clone "$REPO_URL" "$PROJECT_DIR"
-        cd "$PROJECT_DIR"
-        print_success "Repository cloned successfully"
-
-        repair_lfs_if_needed
+install_hq_extras() {
+    print_step "Installing HQ media/doc tools..."
+    local tools=(
+        "marp-cli" "ghostscript" "ffmpeg" "exiftool" "yt-dlp" "pandoc"
+        "imagemagick" "yq" "miller" "sd" "gawk" "coreutils" "parallel"
+        "trash" "eza"
+    )
+    local to_install=() tool cmd
+    for tool in "${tools[@]}"; do
+        cmd="$tool"
+        case "$tool" in
+            "marp-cli")    cmd="marp" ;;
+            "ghostscript") cmd="gs" ;;
+            "imagemagick") cmd="magick" ;;
+            "coreutils")   cmd="gtimeout" ;;
+            "miller")      cmd="mlr" ;;
+        esac
+        command_exists "$cmd" || to_install+=("$tool")
+    done
+    if [[ ${#to_install[@]} -eq 0 ]]; then
+        print_success "HQ tools already installed"
+    else
+        print_info "Installing: ${to_install[*]}"
+        brew install "${to_install[@]}" || print_warning "Some HQ tools failed — continuing"
+        print_success "HQ tools installed"
     fi
 }
 
 repair_lfs_if_needed() {
+    local dir="$1"
     local needs_repair=false
-    local test_file="$PROJECT_DIR/templates/powerpoint/irrational_labs_powerpoint_template_3.pptx"
-
+    local test_file="$dir/templates/powerpoint/irrational_labs_powerpoint_template_3.pptx"
     if [[ -f "$test_file" ]]; then
-        local file_size
-        file_size=$(stat -f%z "$test_file" 2>/dev/null || echo "0")
-        if [[ "$file_size" -lt "$LFS_MIN_SIZE" ]]; then
-            print_warning "LFS files appear to be pointer files (not downloaded)"
-            needs_repair=true
-        fi
+        local size
+        size=$(stat -f%z "$test_file" 2>/dev/null || echo "0")
+        [[ "$size" -lt "$LFS_MIN_SIZE" ]] && needs_repair=true
     else
         needs_repair=true
     fi
-
     if [[ "$needs_repair" == true ]]; then
         print_info "Downloading LFS files (this may take a few minutes)..."
-        cd "$PROJECT_DIR"
+        cd "$dir"
         git lfs install --local
         git lfs pull
         print_success "LFS files downloaded"
@@ -253,98 +312,117 @@ repair_lfs_if_needed() {
     fi
 }
 
-ensure_bun() {
-    print_step "Checking Bun..."
+install_precommit_hook() {
+    local dir="$1"
+    cd "$dir"
+    mkdir -p .git/hooks
+    local hook_file=".git/hooks/pre-commit"
+    cat > "$hook_file" << 'HOOK'
+#!/bin/sh
+PROJECT_ROOT=$(git rev-parse --show-toplevel)
+if ! bun run "$PROJECT_ROOT/scripts/validate_filenames.ts" --staged --quiet; then
+    printf "\n"
+    printf "Commit rejected: One or more filenames contain Windows-incompatible characters.\n"
+    printf "Please rename the files to remove invalid characters before committing.\n"
+    printf "\n"
+    exit 1
+fi
+exit 0
+HOOK
+    chmod +x "$hook_file"
+    print_success "Pre-commit hook installed"
+}
 
-    if command_exists bun; then
-        print_success "bun $(bun --version)"
+load_hq_secrets() {
+    local dir="$1"
+    cd "$dir"
+    if [[ -f ".env" ]]; then
+        print_info ".env already exists (run scripts/load_infisical_env.ts --force to refresh)"
     else
-        print_info "Installing Bun..."
-        curl -fsSL https://bun.sh/install | bash
-
-        export BUN_INSTALL="$HOME/.bun"
-        export PATH="$BUN_INSTALL/bin:$PATH"
-
-        if command_exists bun; then
-            print_success "bun $(bun --version)"
+        print_info "Fetching secrets from Infisical..."
+        if bun run scripts/load_infisical_env.ts; then
+            print_success "Secrets loaded to .env"
         else
-            print_error "Bun installation failed"
-            print_info "Please try manually: curl -fsSL https://bun.sh/install | bash"
-            exit 1
+            WARNINGS+=("HQ: could not load Infisical secrets — ask an admin for access")
+            print_warning "Could not load secrets — continuing"
         fi
     fi
 }
 
-install_cli_tools() {
-    print_step "Installing CLI tools..."
-
-    local core_tools=(
-        "marp-cli"
-        "ghostscript"
-        "ffmpeg"
-        "exiftool"
-        "yt-dlp"
-        "pandoc"
-        "imagemagick"
-        "yq"
-        "jq"
-    )
-
-    local enhanced_tools=(
-        "eza"
-        "fd"
-        "ripgrep"
-        "sd"
-        "gawk"
-        "bat"
-        "coreutils"
-        "fzf"
-        "git-delta"
-        "miller"
-        "parallel"
-        "trash"
-    )
-
-    local all_tools=("${core_tools[@]}" "${enhanced_tools[@]}")
-    local to_install=()
-
-    for tool in "${all_tools[@]}"; do
-        local cmd="$tool"
-        case "$tool" in
-            "marp-cli") cmd="marp" ;;
-            "ghostscript") cmd="gs" ;;
-            "imagemagick") cmd="magick" ;;
-            "ripgrep") cmd="rg" ;;
-            "coreutils") cmd="gtimeout" ;;
-            "git-delta") cmd="delta" ;;
-            "miller") cmd="mlr" ;;
-            "trash") cmd="trash" ;;
-        esac
-
-        if ! command_exists "$cmd"; then
-            to_install+=("$tool")
-        fi
-    done
-
-    if [[ ${#to_install[@]} -eq 0 ]]; then
-        print_success "All CLI tools already installed"
-    else
-        print_info "Installing: ${to_install[*]}"
-        brew install "${to_install[@]}" || {
-            print_warning "Some tools failed to install — continuing anyway"
-        }
-        print_success "CLI tools installed"
-    fi
-}
-
-install_project_deps() {
-    print_step "Installing project dependencies..."
-
-    cd "$PROJECT_DIR"
-
+setup_hq() {
+    local dir="$1"
+    print_step "Running HQ setup..."
+    install_hq_extras
+    repair_lfs_if_needed "$dir"
+    cd "$dir"
     print_info "Running bun install..."
-    bun install
-    print_success "Project dependencies installed"
+    bun install || WARNINGS+=("HQ: bun install failed")
+    install_precommit_hook "$dir"
+    load_hq_secrets "$dir"
+    print_success "HQ setup complete"
+}
+
+setup_generic() {
+    local dir="$1"
+    local base
+    base=$(basename "$dir")
+    print_step "Running generic setup for $base..."
+    cd "$dir"
+    if [[ -f package.json ]]; then
+        print_info "Found package.json — running bun install"
+        bun install || WARNINGS+=("$base: bun install failed")
+    fi
+    if [[ -f .gitattributes ]] && grep -q "filter=lfs" .gitattributes 2>/dev/null; then
+        print_info "Repo uses Git LFS — pulling LFS files"
+        git lfs install --local >/dev/null 2>&1 || true
+        git lfs pull || WARNINGS+=("$base: git lfs pull failed")
+    fi
+    if [[ ! -f .env ]]; then
+        local example=""
+        [[ -f .env.example ]] && example=".env.example"
+        [[ -z "$example" && -f .env.sample ]] && example=".env.sample"
+        if [[ -n "$example" ]]; then
+            cp "$example" .env
+            print_info "Created .env from $example — fill in secrets before use"
+            WARNINGS+=("$base: created .env from $example — needs your secrets")
+        fi
+    fi
+    print_success "$base ready — check its README for any extra setup"
+}
+
+clone_and_setup_repo() {
+    local key="$1"
+    local slug dir setup target
+    slug=$(repo_field "$key" slug)
+    dir=$(repo_field "$key" dir)
+    setup=$(repo_field "$key" setup)
+    target="$HOME/$dir"
+
+    if [[ -z "$slug" ]]; then
+        print_warning "Unknown repo key '$key' — skipping"
+        return 0
+    fi
+
+    print_step "Setting up $slug..."
+
+    if [[ -d "$target/.git" ]]; then
+        print_info "Already cloned at $target — pulling latest"
+        ( cd "$target" && git pull --ff-only ) || true
+    else
+        mkdir -p "$(dirname "$target")"
+        if ! gh repo clone "$slug" "$target"; then
+            WARNINGS+=("Could not clone $slug — check your GitHub access")
+            print_error "Failed to clone $slug (continuing)"
+            return 0
+        fi
+        print_success "Cloned $slug"
+    fi
+
+    case "$setup" in
+        hq)      setup_hq "$target" ;;
+        generic) setup_generic "$target" ;;
+        *)       setup_generic "$target" ;;
+    esac
 }
 
 ensure_claude_code() {
@@ -367,7 +445,7 @@ ensure_claude_code() {
         else
             print_error "Claude Code installation failed"
             print_info "Please try manually: curl -fsSL https://claude.ai/install.sh | bash"
-            exit 1
+            WARNINGS+=("Claude Code install failed — try manually: curl -fsSL https://claude.ai/install.sh | bash")
         fi
     fi
 
@@ -402,7 +480,7 @@ ensure_claude_code() {
     done
 
     if [[ "$wrote_any" == false ]]; then
-        print_info "~/.local/bin already on PATH in shell profile"
+        print_info "PATH already includes ~/.local/bin in your shell profile"
     fi
 
     # Final sanity check — fail loudly if claude still isn't resolvable.
@@ -410,7 +488,7 @@ ensure_claude_code() {
     if ! command_exists claude; then
         print_error "claude installed but not found on PATH"
         print_info "Open a new terminal, or run: source ${profiles[0]}"
-        exit 1
+        WARNINGS+=("Claude Code installed but not yet on PATH — open a new terminal to use it")
     fi
 }
 
@@ -456,57 +534,124 @@ ensure_il_claude_plugins() {
     print_info "(default plugins auto-install on next 'claude' launch)"
 }
 
-setup_git_hooks() {
-    print_step "Setting up git hooks..."
-
-    cd "$PROJECT_DIR"
-    mkdir -p .git/hooks
-
-    local hook_file=".git/hooks/pre-commit"
-    cat > "$hook_file" << 'HOOK'
-#!/bin/sh
-PROJECT_ROOT=$(git rev-parse --show-toplevel)
-if ! bun run "$PROJECT_ROOT/scripts/validate_filenames.ts" --staged --quiet; then
-    printf "\n"
-    printf "Commit rejected: One or more filenames contain Windows-incompatible characters.\n"
-    printf "Please rename the files to remove invalid characters before committing.\n"
-    printf "\n"
-    exit 1
-fi
-exit 0
-HOOK
-    chmod +x "$hook_file"
-    print_success "Pre-commit hook installed"
-}
-
-setup_secrets() {
-    print_step "Setting up API keys and secrets..."
-
-    cd "$PROJECT_DIR"
-
-    if [[ -f ".env" ]]; then
-        print_info ".env file already exists"
-        print_info "Run 'bun run scripts/load_infisical_env.ts --force' to refresh secrets"
+load_manifest() {
+    print_step "Loading repo list..."
+    local fetched=""
+    fetched=$(curl -fsSL "$SETUP_RAW_BASE/repos.json" 2>/dev/null || echo "")
+    if [[ -n "$fetched" ]] && echo "$fetched" | jq empty >/dev/null 2>&1; then
+        REPOS_JSON="$fetched"
+        print_success "Repo list loaded"
     else
-        print_info "Fetching secrets from Infisical..."
-        if bun run scripts/load_infisical_env.ts; then
-            print_success "Secrets loaded to .env"
-        else
-            print_warning "Could not load secrets — you may not have Infisical access"
-            print_info "Contact Kristen or another admin to get access"
-            print_info "You can still use the project, but some tools will be limited"
-        fi
+        REPOS_JSON="$EMBEDDED_REPOS_JSON"
+        print_warning "Couldn't fetch repo list — using built-in default (HQ only)"
     fi
 }
 
+# repo_field <key> <field>  -> prints the field value (empty if not found)
+repo_field() {
+    echo "$REPOS_JSON" | jq -r --arg k "$1" --arg f "$2" \
+        '.repos[] | select(.key==$k) | .[$f] // empty'
+}
+
+all_repo_keys() {
+    echo "$REPOS_JSON" | jq -r '.repos[].key'
+}
+
+select_repos() {
+    SELECTED_KEYS=()
+
+    if [[ "$FLAG_BASE_ONLY" == true ]]; then
+        print_info "Base-only mode — no repositories will be cloned"
+        return 0
+    fi
+
+    # Non-interactive: keys passed via --repos
+    if [[ -n "$FLAG_REPOS" ]]; then
+        local IFS=','
+        local k
+        for k in $FLAG_REPOS; do
+            k=$(echo "$k" | tr -d '[:space:]')
+            [[ -z "$k" ]] && continue
+            if [[ -n "$(repo_field "$k" key)" ]]; then
+                SELECTED_KEYS+=("$k")
+            else
+                print_warning "Unknown repo key '$k' — skipping"
+            fi
+        done
+        return 0
+    fi
+
+    # Interactive: build the access-filtered list
+    print_step "Checking which repos you can access..."
+    local keys=() names=() descs=()
+    local key slug
+    while IFS= read -r key; do
+        [[ -z "$key" ]] && continue
+        slug=$(repo_field "$key" slug)
+        if gh repo view "$slug" >/dev/null 2>&1; then
+            keys+=("$key")
+            names+=("$(repo_field "$key" name)")
+            descs+=("$(repo_field "$key" description)")
+        fi
+    done <<EOF
+$(all_repo_keys)
+EOF
+
+    # Fallback: if access couldn't be verified for anything, show the full list.
+    if [[ ${#keys[@]} -eq 0 ]]; then
+        print_warning "Couldn't verify repo access — showing the full list"
+        while IFS= read -r key; do
+            [[ -z "$key" ]] && continue
+            keys+=("$key")
+            names+=("$(repo_field "$key" name)")
+            descs+=("$(repo_field "$key" description)")
+        done <<EOF
+$(all_repo_keys)
+EOF
+    fi
+
+    # Render the menu to the terminal (stdin is the piped script, so use /dev/tty).
+    {
+        echo ""
+        echo "Which repositories do you want to clone?"
+        local i num
+        for i in "${!keys[@]}"; do
+            num=$((i + 1))
+            printf "  %d) %s — %s\n" "$num" "${names[$i]}" "${descs[$i]}"
+        done
+        echo "  0) None (base tools only)"
+        echo ""
+        printf "Enter numbers separated by spaces or commas (default: 1): "
+    } > /dev/tty
+
+    local answer=""
+    read -r answer < /dev/tty || answer=""
+    [[ -z "$answer" ]] && answer="1"
+    answer="${answer//,/ }"
+
+    local tok idx
+    for tok in $answer; do
+        if [[ "$tok" == "0" ]]; then
+            SELECTED_KEYS=()
+            return 0
+        fi
+        if [[ "$tok" =~ ^[0-9]+$ ]]; then
+            idx=$((tok - 1))
+            if [[ $idx -ge 0 && $idx -lt ${#keys[@]} ]]; then
+                SELECTED_KEYS+=("${keys[$idx]}")
+            else
+                print_warning "Ignoring out-of-range choice: $tok"
+            fi
+        fi
+    done
+}
+
+
 verify_setup() {
     print_step "Verifying setup..."
-
-    cd "$PROJECT_DIR"
-    local all_good=true
-
-    local critical_cmds=("git" "git-lfs" "gh" "bun" "brew")
-    for cmd in "${critical_cmds[@]}"; do
+    local all_good=true cmd
+    local critical=("git" "git-lfs" "gh" "bun" "jq" "brew")
+    for cmd in "${critical[@]}"; do
         if command_exists "$cmd"; then
             print_success "$cmd"
         else
@@ -514,30 +659,12 @@ verify_setup() {
             all_good=false
         fi
     done
-
     if command_exists claude; then
         print_success "claude"
     else
         print_warning "claude not in PATH (may need terminal restart)"
     fi
-
-    local pptx_file="$PROJECT_DIR/templates/powerpoint/irrational_labs_powerpoint_template_3.pptx"
-    if [[ -f "$pptx_file" ]]; then
-        local size
-        size=$(stat -f%z "$pptx_file" 2>/dev/null || echo "0")
-        if [[ "$size" -gt "$LFS_MIN_SIZE" ]]; then
-            print_success "LFS files downloaded correctly"
-        else
-            print_error "LFS files are still pointer files"
-            all_good=false
-        fi
-    fi
-
-    if [[ "$all_good" == true ]]; then
-        return 0
-    else
-        return 1
-    fi
+    [[ "$all_good" == true ]] && return 0 || return 1
 }
 
 print_completion() {
@@ -545,12 +672,20 @@ print_completion() {
     echo -e "${GREEN}${BOLD}════════════════════════════════════════════════════════════${NC}"
     echo -e "${GREEN}${BOLD}  Setup Complete!${NC}"
     echo -e "${GREEN}${BOLD}════════════════════════════════════════════════════════════${NC}"
-    echo ""
-    echo -e "Project location: ${BOLD}$PROJECT_DIR${NC}"
+
+    if [[ ${#WARNINGS[@]} -gt 0 ]]; then
+        echo ""
+        echo -e "${YELLOW}${BOLD}Heads up — a few things need attention:${NC}"
+        local w
+        for w in "${WARNINGS[@]}"; do
+            echo -e "  ${YELLOW}•${NC} $w"
+        done
+    fi
+
     echo ""
     echo -e "${BOLD}Next steps:${NC}"
     echo "  1. Open a new terminal window (to pick up PATH changes)"
-    echo "  2. Run:  cd ~/irrational_labs_hq && claude"
+    echo "  2. cd into a cloned repo and run:  claude"
     echo "  3. Ask Claude: 'Give me a tour of this project'"
     echo ""
     echo -e "${BOLD}If you run into issues:${NC}"
@@ -564,35 +699,39 @@ print_completion() {
 # -----------------------------------------------------------------------------
 
 main() {
+    parse_args "$@"
+
     echo ""
-    echo -e "${BOLD}Irrational Labs HQ — Setup${NC}"
-    echo -e "This will install everything you need."
-    echo -e "Takes about 5–10 minutes."
+    echo -e "${BOLD}Irrational Labs — Setup${NC}"
+    echo -e "This will install your dev tools, then ask which repos to clone."
     echo ""
 
     check_macos
     ensure_xcode_cli
     ensure_homebrew
-    ensure_git_tools
-    ensure_github_auth
+    ensure_early_tools          # step 3: git, git-lfs, gh, jq, bun
+    ensure_github_auth          # step 4
     ensure_git_identity
-    setup_repository
-    ensure_bun
-    install_cli_tools
-    install_project_deps
-    ensure_claude_code
+    ensure_claude_code          # step 5: Claude available before anything that can fail
     ensure_il_claude_plugins
-    setup_git_hooks
-    setup_secrets
+    load_manifest               # step 6
+    select_repos
+    install_shell_helpers       # step 7
+
+    if [[ ${#SELECTED_KEYS[@]} -gt 0 ]]; then          # guard: bash 3.2 + set -u
+        local k
+        set +e
+        for k in "${SELECTED_KEYS[@]}"; do
+            clone_and_setup_repo "$k"
+        done
+        set -e
+    else
+        print_info "No repositories selected — base tools only"
+    fi
 
     echo ""
-    if verify_setup; then
-        print_completion
-    else
-        print_warning "Setup completed with some issues"
-        print_info "Try re-running this script or ask for help"
-        print_completion
-    fi
+    verify_setup || print_warning "Setup completed with some issues"
+    print_completion
 }
 
 main "$@"
