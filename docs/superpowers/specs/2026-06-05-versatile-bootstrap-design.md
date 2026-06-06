@@ -98,8 +98,20 @@ Field notes:
   They only ever select repos by name (menu) or by `key` (`--repos`). The
   script reads the chosen repo's `setup` field to pick the recipe.
 - **Access filter:** before the menu renders, each entry is probed with
-  `gh repo view <slug>`. Entries the user can't access are silently dropped — no
-  errors, no unusable rows. (Requires gh installed + authenticated; see flow.)
+  `gh repo view <slug>` using the *running user's* gh credentials (so it's
+  per-account, not a hardcoded org check). Entries the user can't access are
+  silently dropped — no errors, no unusable rows. (Requires gh installed +
+  authenticated; see flow.)
+  - **Caveat — IL org base permission is `write`:** GitHub's
+    `default_repository_permission` for IrrationalLabs-team is `write`, which is
+    a *floor* — every org member automatically has ≥write on every org repo. So
+    in practice `gh repo view` succeeds for any member on any IL repo, and the
+    menu shows **all** curated repos to **all** members. The filter therefore
+    excludes only non-members / revoked accounts; it does **not** differentiate
+    per-repo team membership among members (e.g. a non-engagement member still
+    sees `engagement-onedash`). This is accepted: the curated `repos.json` list
+    is the real scoping, and the probe auto-adapts if base permissions are ever
+    lowered to `none`.
 - **Manifest fetch + fallback:** both scripts fetch `repos.json` from
   `raw.githubusercontent.com/ChaningJang/setup/main/repos.json`. On fetch
   failure (offline / local run) they fall back to a minimal embedded default
@@ -249,7 +261,9 @@ is over-engineering. Plan:
    - re-run (idempotency)
    - `--base-only`
    - `--repos hq,marketing`
-   - a user *without* engagement access (verify those rows are filtered out)
+   - a **non-org-member** (or revoked account): curated rows are filtered out.
+     (Per-member differentiation does not apply at base permission `write` — see
+     the access-filter caveat above.)
 
 ## Open Implementation-Time Questions
 
