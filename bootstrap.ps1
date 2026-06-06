@@ -19,7 +19,6 @@ $ErrorActionPreference = "Stop"
 # -----------------------------------------------------------------------------
 # Configuration
 # -----------------------------------------------------------------------------
-$ORG            = "IrrationalLabs-team"
 $SETUP_RAW_BASE = "https://raw.githubusercontent.com/ChaningJang/setup/main"
 $LFS_MIN_SIZE   = 1000
 $EMBEDDED_REPOS_JSON = '{"repos":[{"key":"hq","name":"Irrational Labs HQ","slug":"IrrationalLabs-team/irrational_labs_hq","dir":"irrational_labs_hq","setup":"hq","default":true,"description":"Main workspace"}]}'

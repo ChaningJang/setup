@@ -15,7 +15,6 @@ set -euo pipefail
 # -----------------------------------------------------------------------------
 # Configuration
 # -----------------------------------------------------------------------------
-ORG="IrrationalLabs-team"
 SETUP_RAW_BASE="https://raw.githubusercontent.com/ChaningJang/setup/main"
 LFS_MIN_SIZE=1000
 
@@ -481,7 +480,7 @@ ensure_claude_code() {
     done
 
     if [[ "$wrote_any" == false ]]; then
-        print_info "~/.local/bin already on PATH in shell profile"
+        print_info "PATH already includes ~/.local/bin in your shell profile"
     fi
 
     # Final sanity check — fail loudly if claude still isn't resolvable.
