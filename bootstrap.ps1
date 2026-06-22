@@ -95,7 +95,7 @@ function Ensure-Scoop {
 }
 
 function Ensure-EarlyTools {
-    Print-Step "Installing core tools (git, git-lfs, gh, jq, bun)..."
+    Print-Step "Installing core tools (git, git-lfs, gh, jq, node, bun)..."
 
     if (-not (Test-CommandExists "git")) {
         winget install --id Git.Git --accept-source-agreements --accept-package-agreements -e
@@ -123,6 +123,15 @@ function Ensure-EarlyTools {
         Refresh-Path
     }
     Print-Success "jq ready"
+
+    # Node gives us npm, needed to install global CLI tools like the gws
+    # (Google Workspace) CLI in Ensure-IlClaudePlugins.
+    if (-not (Test-CommandExists "npm")) {
+        winget install --id OpenJS.NodeJS --accept-source-agreements --accept-package-agreements -e
+        Refresh-Path
+    }
+    if (Test-CommandExists "npm") { Print-Success "node $(node --version) / npm $(npm --version)" }
+    else { Print-Warning "Node may need a terminal restart" }
 
     if (Test-CommandExists "bun") {
         Print-Success "bun $(bun --version)"
@@ -331,6 +340,21 @@ function Ensure-IlClaudePlugins {
     Print-Success "IL plugin marketplace registered"
     Print-Info "Default-on: gws, il-slides, key-behavior"
     Print-Info "Available on demand: gorilla-scripting, pipedrive"
+
+    # The gws plugin drives the `gws` Google Workspace CLI (a separate npm
+    # package). Install it globally so /gws:setup works out of the box.
+    if (Test-CommandExists "gws") {
+        Print-Success "gws CLI already installed"
+    } elseif (Test-CommandExists "npm") {
+        Print-Info "Installing gws (Google Workspace) CLI..."
+        npm install -g '@googleworkspace/cli' 2>$null
+        Refresh-Path
+        if (Test-CommandExists "gws") { Print-Success "gws CLI installed" }
+        else { Print-Warning "gws CLI install failed - run: npm install -g @googleworkspace/cli" }
+    } else {
+        Print-Warning "npm not available - skipping gws CLI install"
+    }
+    Print-Info "After restart, run /gws:setup and sign in with your @irrationallabs.com account"
 }
 
 function Load-Manifest {

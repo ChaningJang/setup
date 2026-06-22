@@ -25,9 +25,9 @@ irm https://raw.githubusercontent.com/ChaningJang/setup/main/bootstrap.ps1 | iex
 
 ## What it does
 
-1. Installs base tools: Git, Git LFS, GitHub CLI, jq, Bun, Claude Code, and shell helpers (ripgrep, fd, bat, fzf, delta).
+1. Installs base tools: Git, Git LFS, GitHub CLI, jq, Node (npm), Bun, Claude Code, and shell helpers (ripgrep, fd, bat, fzf, delta).
 2. Signs you in to GitHub and sets your commit identity.
-3. Registers the IL Claude Code plugins.
+3. Registers the IL Claude Code plugins and installs the [`gws` Google Workspace CLI](https://www.npmjs.com/package/@googleworkspace/cli) (run `/gws:setup` in Claude Code afterward to sign in).
 4. **Asks which repositories to clone** — the menu only shows repos your GitHub account can access.
 5. For **Irrational Labs HQ**, runs its full setup (media tools, Git LFS, dependencies, secrets). Other repos get a generic best-effort setup (dependencies, LFS, `.env` scaffold).
 

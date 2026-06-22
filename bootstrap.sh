@@ -141,7 +141,7 @@ ensure_homebrew() {
 }
 
 ensure_early_tools() {
-    print_step "Installing core tools (git, git-lfs, gh, jq, bun)..."
+    print_step "Installing core tools (git, git-lfs, gh, jq, node, bun)..."
 
     command_exists git     || { print_info "Installing git...";     brew install git; }
     print_success "git $(git --version | cut -d' ' -f3)"
@@ -155,6 +155,12 @@ ensure_early_tools() {
 
     command_exists jq      || { print_info "Installing jq...";      brew install jq; }
     print_success "jq ready"
+
+    # Node gives us npm, which we need to install global CLI tools like the
+    # gws (Google Workspace) CLI in ensure_il_claude_plugins. The Homebrew
+    # node formula bundles npm, so this single install covers both.
+    command_exists npm     || { print_info "Installing Node (provides npm)..."; brew install node; }
+    print_success "node $(node --version) / npm $(npm --version)"
 
     if command_exists bun; then
         print_success "bun $(bun --version)"
@@ -532,6 +538,26 @@ ensure_il_claude_plugins() {
     print_info "Available on demand: gorilla-scripting, pipedrive"
     print_info "  install with: /plugin install <name>@irrational-labs-plugins"
     print_info "(default plugins auto-install on next 'claude' launch)"
+
+    # The gws plugin/skill drives the `gws` Google Workspace CLI — a separate
+    # npm package. Install it globally so /gws:setup works out of the box.
+    # (npm is guaranteed by ensure_early_tools, which runs earlier in main.)
+    if command_exists gws; then
+        print_success "gws CLI $(gws --version 2>/dev/null | head -1 | cut -d' ' -f2)"
+    elif command_exists npm; then
+        print_info "Installing gws (Google Workspace) CLI..."
+        if npm install -g @googleworkspace/cli >/dev/null 2>&1; then
+            hash -r 2>/dev/null || true
+            print_success "gws CLI installed"
+        else
+            print_warning "gws CLI install failed"
+            WARNINGS+=("gws CLI not installed — run: npm install -g @googleworkspace/cli")
+        fi
+    else
+        print_warning "npm not available — skipping gws CLI install"
+        WARNINGS+=("gws CLI not installed (npm missing) — run: npm install -g @googleworkspace/cli")
+    fi
+    print_info "After restart, run /gws:setup and sign in with your @irrationallabs.com account"
 }
 
 load_manifest() {
@@ -650,7 +676,7 @@ EOF
 verify_setup() {
     print_step "Verifying setup..."
     local all_good=true cmd
-    local critical=("git" "git-lfs" "gh" "bun" "jq" "brew")
+    local critical=("git" "git-lfs" "gh" "bun" "jq" "node" "npm" "brew")
     for cmd in "${critical[@]}"; do
         if command_exists "$cmd"; then
             print_success "$cmd"
