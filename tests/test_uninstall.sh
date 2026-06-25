@@ -78,9 +78,60 @@ test_restore_git_identity_no_prior() {
     rm -f "$IL_SETUP_RECEIPT"
 }
 
+test_remove_repos_dryrun() {
+    export IL_SETUP_RECEIPT; IL_SETUP_RECEIPT="$(mktemp)"
+    echo '{"repos_cloned":[{"path":"/tmp/il/hq","created_dir":true},{"path":"/tmp/pre/repo","created_dir":false}]}' > "$IL_SETUP_RECEIPT"
+    load_receipt
+    local out; out="$(IL_DRY_RUN=1 remove_repos)"
+    assert_contains "$out" 'DRYRUN: rm -rf /tmp/il/hq' "deletes created-dir repo path" || fail=1
+    assert_contains "$out" 'DRYRUN: rm -rf /tmp/pre/repo' "deletes repo subdir even when parent pre-existed" || fail=1
+    rm -f "$IL_SETUP_RECEIPT"
+}
+
+test_remove_gws_dryrun() {
+    export IL_SETUP_RECEIPT; IL_SETUP_RECEIPT="$(mktemp)"
+    echo '{"gws_cli_installed_by_us":true}' > "$IL_SETUP_RECEIPT"
+    load_receipt
+    local out; out="$(IL_DRY_RUN=1 remove_gws)"
+    assert_contains "$out" 'DRYRUN: npm uninstall -g @googleworkspace/cli' "uninstalls gws cli when we installed it" || fail=1
+    rm -f "$IL_SETUP_RECEIPT"
+}
+
+test_remove_github_auth_gated() {
+    export IL_SETUP_RECEIPT; IL_SETUP_RECEIPT="$(mktemp)"
+    echo '{"gh_was_authenticated_before":true}' > "$IL_SETUP_RECEIPT"
+    load_receipt
+    local out; out="$(IL_DRY_RUN=1 remove_github_auth)"
+    assert_not_contains "$out" 'gh auth logout' "does NOT log out if user was authed before setup" || fail=1
+    echo '{"gh_was_authenticated_before":false}' > "$IL_SETUP_RECEIPT"
+    load_receipt
+    out="$(IL_DRY_RUN=1 remove_github_auth)"
+    assert_contains "$out" 'DRYRUN: gh auth logout' "logs out when setup is what authed them" || fail=1
+    rm -f "$IL_SETUP_RECEIPT"
+}
+
+test_remove_dev_tools_only_receipt_formulae() {
+    export IL_SETUP_RECEIPT; IL_SETUP_RECEIPT="$(mktemp)"
+    echo '{"formulae_installed_by_us":["node","ffmpeg"],"bun_installed_by_us":true}' > "$IL_SETUP_RECEIPT"
+    load_receipt
+    # Stub brew so `brew uses --installed` reports no dependents (safe to remove).
+    brew() { if [[ "$1" == "uses" ]]; then return 0; fi; echo "DRYRUN: brew $*"; }
+    export -f brew 2>/dev/null || true
+    local out; out="$(IL_DRY_RUN=1 remove_dev_tools)"
+    assert_contains "$out" 'DRYRUN: brew uninstall node' "uninstalls receipt formula node" || fail=1
+    assert_contains "$out" 'DRYRUN: brew uninstall ffmpeg' "uninstalls receipt formula ffmpeg" || fail=1
+    assert_not_contains "$out" 'brew uninstall git' "never touches a non-receipt formula" || fail=1
+    unset -f brew
+    rm -f "$IL_SETUP_RECEIPT"
+}
+
 test_preset_mapping
 test_strip_il_settings
 test_remove_il_path_block
 test_restore_git_identity_with_prior
 test_restore_git_identity_no_prior
+test_remove_repos_dryrun
+test_remove_gws_dryrun
+test_remove_github_auth_gated
+test_remove_dev_tools_only_receipt_formulae
 exit $fail
