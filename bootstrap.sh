@@ -278,8 +278,12 @@ install_shell_helpers() {
         print_success "Shell helpers already installed"
     else
         print_info "Installing: ${to_install[*]}"
-        brew install "${to_install[@]}" || print_warning "Some shell helpers failed — continuing"
-        print_success "Shell helpers installed"
+        if brew install "${to_install[@]}"; then
+            for _f in "${to_install[@]}"; do record_formula_installed "$_f"; done
+            print_success "Shell helpers installed"
+        else
+            print_warning "Some shell helpers failed — continuing"
+        fi
     fi
 }
 
@@ -306,8 +310,12 @@ install_hq_extras() {
         print_success "HQ tools already installed"
     else
         print_info "Installing: ${to_install[*]}"
-        brew install "${to_install[@]}" || print_warning "Some HQ tools failed — continuing"
-        print_success "HQ tools installed"
+        if brew install "${to_install[@]}"; then
+            for _f in "${to_install[@]}"; do record_formula_installed "$_f"; done
+            print_success "HQ tools installed"
+        else
+            print_warning "Some HQ tools failed — continuing"
+        fi
     fi
 }
 
@@ -873,7 +881,5 @@ main() {
     print_completion
 }
 
-# Only run main when executed directly — allows tests to source this file.
-if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
-    main "$@"
-fi
+# Run main unless this file is being sourced (e.g. by tests).
+(return 0 2>/dev/null) || main "$@"

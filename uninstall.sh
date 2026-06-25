@@ -230,7 +230,7 @@ run_category() {
 
 confirm() {
     local prompt="$1" reply
-    read -r -p "$prompt [y/N] " reply
+    read -r -p "$prompt [y/N] " reply < /dev/tty
     [[ "$reply" == "y" || "$reply" == "Y" ]]
 }
 
@@ -251,7 +251,7 @@ main() {
     echo "  4) Cancel"
     echo ""
     local choice cats=""
-    read -r -p "Choose [1]: " choice
+    read -r -p "Choose [1]: " choice < /dev/tty
     choice="${choice:-1}"
 
     case "$choice" in
@@ -267,9 +267,10 @@ main() {
     esac
 
     [[ -n "${cats// /}" ]] || { print_info "Nothing selected — cancelled."; return 0; }
+    cats="${cats# }"
 
     echo ""
-    print_step "Will reverse:${cats}"
+    print_step "Will reverse: ${cats}"
     if ! confirm "Proceed?"; then print_info "Cancelled."; return 0; fi
 
     local id
@@ -287,6 +288,5 @@ main() {
     print_info "Open a new terminal to drop the removed PATH entries."
 }
 
-if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
-    main "$@"
-fi
+# Run main unless this file is being sourced (e.g. by tests).
+(return 0 2>/dev/null) || main "$@"
