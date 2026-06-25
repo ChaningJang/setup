@@ -28,6 +28,19 @@ REPOS_JSON=""          # loaded manifest (string)
 SELECTED_KEYS=()       # repo keys chosen to clone
 WARNINGS=()            # non-fatal issues, reprinted at the end
 
+# ---- Receipt state (what this run changed; written to disk by write_receipt) -
+IL_FORMULAE_INSTALLED=()   # brew formulae we installed this run
+IL_PATH_PROFILES=()        # shell profiles we added the il-setup PATH block to
+IL_REPOS_CLONED=()         # "path|created_dir" entries
+IL_BREW_INSTALLED=false
+IL_BUN_INSTALLED=false
+IL_CLAUDE_INSTALLED=false
+IL_GWS_INSTALLED=false
+IL_SETTINGS_TOUCHED=false
+IL_PRIOR_GIT_NAME=""
+IL_PRIOR_GIT_EMAIL=""
+IL_GH_AUTHED_BEFORE=""
+
 # Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -132,6 +145,7 @@ ensure_homebrew() {
             fi
         fi
         print_success "Homebrew installed"
+        IL_BREW_INSTALLED=true
     fi
 
     # Ensure brew is in PATH for this session
@@ -143,23 +157,23 @@ ensure_homebrew() {
 ensure_early_tools() {
     print_step "Installing core tools (git, git-lfs, gh, jq, node, bun)..."
 
-    command_exists git     || { print_info "Installing git...";     brew install git; }
+    if ! command_exists git;     then print_info "Installing git...";     brew install git     && record_formula_installed git;     fi
     print_success "git $(git --version | cut -d' ' -f3)"
 
-    command_exists git-lfs || { print_info "Installing git-lfs..."; brew install git-lfs; }
+    if ! command_exists git-lfs; then print_info "Installing git-lfs..."; brew install git-lfs && record_formula_installed git-lfs; fi
     git lfs install >/dev/null 2>&1
     print_success "git-lfs ready"
 
-    command_exists gh      || { print_info "Installing GitHub CLI..."; brew install gh; }
+    if ! command_exists gh;      then print_info "Installing GitHub CLI..."; brew install gh   && record_formula_installed gh;      fi
     print_success "gh $(gh --version | head -1 | cut -d' ' -f3)"
 
-    command_exists jq      || { print_info "Installing jq...";      brew install jq; }
+    if ! command_exists jq;      then print_info "Installing jq...";      brew install jq      && record_formula_installed jq;      fi
     print_success "jq ready"
 
     # Node gives us npm, which we need to install global CLI tools like the
     # gws (Google Workspace) CLI in ensure_il_claude_plugins. The Homebrew
     # node formula bundles npm, so this single install covers both.
-    command_exists npm     || { print_info "Installing Node (provides npm)..."; brew install node; }
+    if ! command_exists npm;     then print_info "Installing Node (provides npm)..."; brew install node && record_formula_installed node; fi
     print_success "node $(node --version) / npm $(npm --version)"
 
     if command_exists bun; then
@@ -171,6 +185,7 @@ ensure_early_tools() {
         export PATH="$BUN_INSTALL/bin:$PATH"
         if command_exists bun; then
             print_success "bun $(bun --version)"
+            IL_BUN_INSTALLED=true
         else
             print_error "Bun installation failed"
             exit 1
@@ -263,8 +278,12 @@ install_shell_helpers() {
         print_success "Shell helpers already installed"
     else
         print_info "Installing: ${to_install[*]}"
-        brew install "${to_install[@]}" || print_warning "Some shell helpers failed — continuing"
-        print_success "Shell helpers installed"
+        if brew install "${to_install[@]}"; then
+            for _f in "${to_install[@]}"; do record_formula_installed "$_f"; done
+            print_success "Shell helpers installed"
+        else
+            print_warning "Some shell helpers failed — continuing"
+        fi
     fi
 }
 
@@ -291,8 +310,12 @@ install_hq_extras() {
         print_success "HQ tools already installed"
     else
         print_info "Installing: ${to_install[*]}"
-        brew install "${to_install[@]}" || print_warning "Some HQ tools failed — continuing"
-        print_success "HQ tools installed"
+        if brew install "${to_install[@]}"; then
+            for _f in "${to_install[@]}"; do record_formula_installed "$_f"; done
+            print_success "HQ tools installed"
+        else
+            print_warning "Some HQ tools failed — continuing"
+        fi
     fi
 }
 
@@ -415,12 +438,16 @@ clone_and_setup_repo() {
         print_info "Already cloned at $target — pulling latest"
         ( cd "$target" && git pull --ff-only ) || true
     else
-        mkdir -p "$(dirname "$target")"
+        local parent created_dir=false
+        parent="$(dirname "$target")"
+        [[ -d "$parent" ]] || created_dir=true
+        mkdir -p "$parent"
         if ! gh repo clone "$slug" "$target"; then
             WARNINGS+=("Could not clone $slug — check your GitHub access")
             print_error "Failed to clone $slug (continuing)"
             return 0
         fi
+        record_repo_cloned "$target" "$created_dir"
         print_success "Cloned $slug"
     fi
 
@@ -448,6 +475,7 @@ ensure_claude_code() {
 
         if command_exists claude; then
             print_success "Claude Code installed"
+            IL_CLAUDE_INSTALLED=true
         else
             print_error "Claude Code installation failed"
             print_info "Please try manually: curl -fsSL https://claude.ai/install.sh | bash"
@@ -477,9 +505,7 @@ ensure_claude_code() {
     local wrote_any=false
     for shell_profile in "${profiles[@]}"; do
         if ! grep -qF '.local/bin' "$shell_profile" 2>/dev/null; then
-            echo "" >> "$shell_profile"
-            echo "# Claude Code" >> "$shell_profile"
-            echo "$path_line" >> "$shell_profile"
+            write_il_path_block "$shell_profile" "$path_line"
             print_success "Added ~/.local/bin to PATH in $(basename "$shell_profile")"
             wrote_any=true
         fi
@@ -532,6 +558,7 @@ ensure_il_claude_plugins() {
       | .enabledPlugins["il-slides@irrational-labs-plugins"]    |= (if . == null then true else . end)
       | .enabledPlugins["key-behavior@irrational-labs-plugins"] |= (if . == null then true else . end)
     ' "$settings" > "$tmp" && mv "$tmp" "$settings"
+    IL_SETTINGS_TOUCHED=true
 
     print_success "IL plugin marketplace registered"
     print_info "Default-on: gws, il-slides, key-behavior"
@@ -549,6 +576,7 @@ ensure_il_claude_plugins() {
         if npm install -g @googleworkspace/cli >/dev/null 2>&1; then
             hash -r 2>/dev/null || true
             print_success "gws CLI installed"
+            IL_GWS_INSTALLED=true
         else
             print_warning "gws CLI install failed"
             WARNINGS+=("gws CLI not installed — run: npm install -g @googleworkspace/cli")
@@ -720,6 +748,97 @@ print_completion() {
     echo ""
 }
 
+il_receipt_path() {
+    echo "${IL_SETUP_RECEIPT:-$HOME/.config/il-setup/receipt.json}"
+}
+
+record_formula_installed() { IL_FORMULAE_INSTALLED+=("$1"); }
+record_path_profile()      { IL_PATH_PROFILES+=("$1"); }
+record_repo_cloned()       { IL_REPOS_CLONED+=("$1|$2"); }   # path, created_dir(true/false)
+
+# Read state we are about to overwrite. Prefer values already saved in the
+# receipt (so re-runs keep the ORIGINAL pre-setup state), else read live.
+capture_prior_state() {
+    local path; path="$(il_receipt_path)"
+    if command_exists jq && [[ -f "$path" ]] && [[ "$(jq -r 'has("git_identity_prior")' "$path" 2>/dev/null)" == "true" ]]; then
+        IL_PRIOR_GIT_NAME="$(jq -r '.git_identity_prior.name // ""' "$path")"
+        IL_PRIOR_GIT_EMAIL="$(jq -r '.git_identity_prior.email // ""' "$path")"
+    else
+        IL_PRIOR_GIT_NAME="$(git config --global user.name 2>/dev/null || echo "")"
+        IL_PRIOR_GIT_EMAIL="$(git config --global user.email 2>/dev/null || echo "")"
+    fi
+    if command_exists jq && [[ -f "$path" ]] && [[ "$(jq -r 'has("gh_was_authenticated_before")' "$path" 2>/dev/null)" == "true" ]]; then
+        IL_GH_AUTHED_BEFORE="$(jq -r '.gh_was_authenticated_before' "$path")"
+    elif gh auth status >/dev/null 2>&1; then
+        IL_GH_AUTHED_BEFORE="true"
+    else
+        IL_GH_AUTHED_BEFORE="false"
+    fi
+}
+
+# Serialize in-memory receipt state to disk. Merges with any existing receipt so
+# re-runs accumulate; prior-state fields are written only if not already present.
+write_receipt() {
+    command_exists jq || { print_warning "jq unavailable — skipping setup receipt"; return 0; }
+    local path; path="$(il_receipt_path)"
+    mkdir -p "$(dirname "$path")"
+    [[ -f "$path" ]] || echo '{}' > "$path"
+
+    local formulae_json profiles_json repos_json
+    formulae_json="$(printf '%s\n' "${IL_FORMULAE_INSTALLED[@]:-}" | jq -R 'select(length>0)' | jq -s .)"
+    profiles_json="$(printf '%s\n' "${IL_PATH_PROFILES[@]:-}"   | jq -R 'select(length>0)' | jq -s .)"
+    repos_json="$(printf '%s\n' "${IL_REPOS_CLONED[@]:-}" \
+        | jq -R 'select(length>0) | split("|") | {path: .[0], created_dir: (.[1]=="true")}' | jq -s .)"
+
+    local tmp; tmp="$(mktemp)"
+    jq \
+        --argjson formulae "$formulae_json" \
+        --argjson profiles "$profiles_json" \
+        --argjson repos "$repos_json" \
+        --arg brew "$IL_BREW_INSTALLED" \
+        --arg bun "$IL_BUN_INSTALLED" \
+        --arg claude "$IL_CLAUDE_INSTALLED" \
+        --arg gws "$IL_GWS_INSTALLED" \
+        --arg settings "$IL_SETTINGS_TOUCHED" \
+        --arg gname "$IL_PRIOR_GIT_NAME" \
+        --arg gemail "$IL_PRIOR_GIT_EMAIL" \
+        --arg ghbefore "$IL_GH_AUTHED_BEFORE" \
+        '
+        .schema_version = 1
+        | .formulae_installed_by_us = (((.formulae_installed_by_us // []) + $formulae) | unique)
+        | .path_edits = (((.path_edits // []) + $profiles) | unique)
+        | .repos_cloned = (((.repos_cloned // []) + $repos) | unique_by(.path))
+        | .brew_installed_by_us       = ((.brew_installed_by_us // false)       or ($brew == "true"))
+        | .bun_installed_by_us        = ((.bun_installed_by_us // false)        or ($bun == "true"))
+        | .claude_code_installed_by_us= ((.claude_code_installed_by_us // false) or ($claude == "true"))
+        | .gws_cli_installed_by_us    = ((.gws_cli_installed_by_us // false)    or ($gws == "true"))
+        | (if ($settings == "true") then
+              .claude_settings = {marketplace: "irrational-labs-plugins",
+                                  plugins: ["gws@irrational-labs-plugins",
+                                            "il-slides@irrational-labs-plugins",
+                                            "key-behavior@irrational-labs-plugins"]}
+           else . end)
+        | (if (has("git_identity_prior")) then . else .git_identity_prior = {name: $gname, email: $gemail} end)
+        | (if (has("gh_was_authenticated_before")) then . else .gh_was_authenticated_before = ($ghbefore == "true") end)
+        ' "$path" > "$tmp" && mv "$tmp" "$path"
+}
+
+# Append a marker-delimited PATH block to a profile, once, and record it so the
+# uninstaller can remove exactly this block.
+write_il_path_block() {
+    local profile="$1" line="$2"
+    if grep -qF '# >>> il-setup >>>' "$profile" 2>/dev/null; then
+        return 0
+    fi
+    {
+        echo ""
+        echo "# >>> il-setup >>>"
+        echo "$line"
+        echo "# <<< il-setup <<<"
+    } >> "$profile"
+    record_path_profile "$profile"
+}
+
 # -----------------------------------------------------------------------------
 # Main
 # -----------------------------------------------------------------------------
@@ -736,6 +855,7 @@ main() {
     ensure_xcode_cli
     ensure_homebrew
     ensure_early_tools          # step 3: git, git-lfs, gh, jq, bun
+    capture_prior_state         # record pre-setup git identity + gh auth state
     ensure_github_auth          # step 4
     ensure_git_identity
     ensure_claude_code          # step 5: Claude available before anything that can fail
@@ -756,8 +876,10 @@ main() {
     fi
 
     echo ""
+    write_receipt               # persist what this run changed (for the uninstaller)
     verify_setup || print_warning "Setup completed with some issues"
     print_completion
 }
 
-main "$@"
+# Run main unless this file is being sourced (e.g. by tests).
+(return 0 2>/dev/null) || main "$@"

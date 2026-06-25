@@ -27,6 +27,105 @@ $script:ReposJson    = $null
 $script:SelectedKeys = @()
 $script:Warnings     = @()
 
+# ---- Receipt state -----------------------------------------------------------
+$script:ILFormulae   = @()        # winget/scoop ids we installed
+$script:ILPathFiles  = @()        # profile files we edited
+$script:ILRepos      = @()        # @{ path=...; created_dir=$true/$false }
+$script:ILBrew       = $false     # n/a on Windows; kept for schema parity
+$script:ILBun        = $false
+$script:ILClaude     = $false
+$script:ILGws        = $false
+$script:ILSettings   = $false
+$script:ILPriorGitName  = ""
+$script:ILPriorGitEmail = ""
+$script:ILGhBefore      = $null
+
+function Get-ReceiptPath {
+    if ($env:IL_SETUP_RECEIPT) { return $env:IL_SETUP_RECEIPT }
+    return (Join-Path $env:LOCALAPPDATA "il-setup\receipt.json")
+}
+
+function Capture-PriorState {
+    $path = Get-ReceiptPath
+    $existing = $null
+    if (Test-Path $path) { try { $existing = Get-Content -Raw $path | ConvertFrom-Json } catch { $existing = $null } }
+    if ($existing -and ($existing.PSObject.Properties.Name -contains "git_identity_prior")) {
+        $script:ILPriorGitName  = $existing.git_identity_prior.name
+        $script:ILPriorGitEmail = $existing.git_identity_prior.email
+    } else {
+        $script:ILPriorGitName  = (git config --global user.name) 2>$null
+        $script:ILPriorGitEmail = (git config --global user.email) 2>$null
+        if (-not $script:ILPriorGitName)  { $script:ILPriorGitName  = "" }
+        if (-not $script:ILPriorGitEmail) { $script:ILPriorGitEmail = "" }
+    }
+    if ($existing -and ($existing.PSObject.Properties.Name -contains "gh_was_authenticated_before")) {
+        $script:ILGhBefore = $existing.gh_was_authenticated_before
+    } else {
+        gh auth status *> $null
+        $script:ILGhBefore = ($LASTEXITCODE -eq 0)
+    }
+}
+
+function Write-Receipt {
+    $path = Get-ReceiptPath
+    $dir = Split-Path $path
+    if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+
+    $existing = [PSCustomObject]@{}
+    if (Test-Path $path) { try { $existing = Get-Content -Raw $path | ConvertFrom-Json } catch { $existing = [PSCustomObject]@{} } }
+
+    function _arr($o,$n) { if ($o.PSObject.Properties.Name -contains $n -and $o.$n) { return @($o.$n) } else { return @() } }
+    function _bool($o,$n) { if ($o.PSObject.Properties.Name -contains $n) { return [bool]$o.$n } else { return $false } }
+
+    $formulae = (@(_arr $existing 'formulae_installed_by_us') + $script:ILFormulae) | Sort-Object -Unique
+    $paths    = (@(_arr $existing 'path_edits') + $script:ILPathFiles) | Sort-Object -Unique
+
+    $repos = @()
+    $seen = @{}
+    foreach ($r in @(_arr $existing 'repos_cloned')) { if ($r.path -and -not $seen.ContainsKey($r.path)) { $repos += $r; $seen[$r.path]=$true } }
+    foreach ($r in $script:ILRepos) { if ($r.path -and -not $seen.ContainsKey($r.path)) { $repos += $r; $seen[$r.path]=$true } }
+
+    $receipt = [ordered]@{
+        schema_version             = 1
+        formulae_installed_by_us   = @($formulae)
+        path_edits                 = @($paths)
+        repos_cloned               = @($repos)
+        brew_installed_by_us       = ((_bool $existing 'brew_installed_by_us') -or $script:ILBrew)
+        bun_installed_by_us        = ((_bool $existing 'bun_installed_by_us') -or $script:ILBun)
+        claude_code_installed_by_us= ((_bool $existing 'claude_code_installed_by_us') -or $script:ILClaude)
+        gws_cli_installed_by_us    = ((_bool $existing 'gws_cli_installed_by_us') -or $script:ILGws)
+    }
+    if ($script:ILSettings) {
+        $receipt.claude_settings = [ordered]@{ marketplace = "irrational-labs-plugins";
+            plugins = @("gws@irrational-labs-plugins","il-slides@irrational-labs-plugins","key-behavior@irrational-labs-plugins") }
+    } elseif ($existing.PSObject.Properties.Name -contains 'claude_settings') {
+        $receipt.claude_settings = $existing.claude_settings
+    }
+    if ($existing.PSObject.Properties.Name -contains 'git_identity_prior') {
+        $receipt.git_identity_prior = $existing.git_identity_prior
+    } else {
+        $receipt.git_identity_prior = [ordered]@{ name = $script:ILPriorGitName; email = $script:ILPriorGitEmail }
+    }
+    if ($existing.PSObject.Properties.Name -contains 'gh_was_authenticated_before') {
+        $receipt.gh_was_authenticated_before = $existing.gh_was_authenticated_before
+    } else {
+        $receipt.gh_was_authenticated_before = [bool]$script:ILGhBefore
+    }
+
+    $json = [PSCustomObject]$receipt | ConvertTo-Json -Depth 12
+    [System.IO.File]::WriteAllText($path, $json, (New-Object System.Text.UTF8Encoding($false)))
+}
+
+function Add-IlPathBlock([string]$ProfilePath, [string]$Line) {
+    if (-not (Test-Path $ProfilePath)) {
+        New-Item -ItemType Directory -Path (Split-Path $ProfilePath) -Force | Out-Null
+        New-Item -ItemType File -Path $ProfilePath -Force | Out-Null
+    }
+    if (Select-String -Path $ProfilePath -SimpleMatch "# >>> il-setup >>>" -Quiet) { return }
+    Add-Content -Path $ProfilePath -Value "`n# >>> il-setup >>>`n$Line`n# <<< il-setup <<<"
+    $script:ILPathFiles += $ProfilePath
+}
+
 # -----------------------------------------------------------------------------
 # Helper Functions
 # -----------------------------------------------------------------------------
@@ -100,6 +199,7 @@ function Ensure-EarlyTools {
     if (-not (Test-CommandExists "git")) {
         winget install --id Git.Git --accept-source-agreements --accept-package-agreements -e
         Refresh-Path
+        if (Test-CommandExists "git") { $script:ILFormulae += "Git.Git" }
     }
     if (Test-CommandExists "git") { Print-Success "git $(git --version)" }
     else { Print-Error "Git installation failed"; throw "Git is required" }
@@ -107,6 +207,7 @@ function Ensure-EarlyTools {
     if (-not (Test-CommandExists "git-lfs")) {
         winget install --id GitHub.GitLFS --accept-source-agreements --accept-package-agreements -e
         Refresh-Path
+        if (Test-CommandExists "git-lfs") { $script:ILFormulae += "GitHub.GitLFS" }
     }
     git lfs install 2>$null | Out-Null
     Print-Success "git-lfs ready"
@@ -114,6 +215,7 @@ function Ensure-EarlyTools {
     if (-not (Test-CommandExists "gh")) {
         winget install --id GitHub.cli --accept-source-agreements --accept-package-agreements -e
         Refresh-Path
+        if (Test-CommandExists "gh") { $script:ILFormulae += "GitHub.cli" }
     }
     if (Test-CommandExists "gh") { Print-Success "gh installed" }
     else { Print-Warning "gh may need a terminal restart" }
@@ -121,6 +223,7 @@ function Ensure-EarlyTools {
     if (-not (Test-CommandExists "jq")) {
         scoop install jq 2>$null
         Refresh-Path
+        if (Test-CommandExists "jq") { $script:ILFormulae += "jq" }
     }
     Print-Success "jq ready"
 
@@ -129,6 +232,7 @@ function Ensure-EarlyTools {
     if (-not (Test-CommandExists "npm")) {
         winget install --id OpenJS.NodeJS --accept-source-agreements --accept-package-agreements -e
         Refresh-Path
+        if (Test-CommandExists "npm") { $script:ILFormulae += "OpenJS.NodeJS" }
     }
     if (Test-CommandExists "npm") { Print-Success "node $(node --version) / npm $(npm --version)" }
     else { Print-Warning "Node may need a terminal restart" }
@@ -141,7 +245,10 @@ function Ensure-EarlyTools {
         Refresh-Path
         $bunPath = "$HOME\.bun\bin"
         if (Test-Path $bunPath) { $env:Path = "$bunPath;$env:Path" }
-        if (Test-CommandExists "bun") { Print-Success "bun $(bun --version)" }
+        if (Test-CommandExists "bun") {
+            Print-Success "bun $(bun --version)"
+            $script:ILBun = $true
+        }
         else { Print-Error "Bun installation failed"; throw "Bun is required" }
     }
 }
@@ -269,11 +376,14 @@ function Ensure-ClaudeCode {
         Refresh-Path
         $bunBin = "$HOME\.bun\bin"
         if (Test-Path $bunBin) { $env:Path = "$bunBin;$env:Path" }
+        if (Test-CommandExists "claude") { $script:ILClaude = $true }
     }
 
     # Persist bun global bin on the User PATH so future terminals find claude.
     $bunBin = "$HOME\.bun\bin"
     if (Test-Path $bunBin) {
+        $psProfile = $PROFILE.CurrentUserAllHosts
+        Add-IlPathBlock $psProfile "`$env:Path = `"$bunBin;`$env:Path`""
         $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
         if ($userPath -notlike "*$bunBin*") {
             [Environment]::SetEnvironmentVariable("Path", "$userPath;$bunBin", "User")
@@ -337,6 +447,7 @@ function Ensure-IlClaudePlugins {
     # PowerShell 5.1, which can break JSON parsers reading settings.json).
     $json = $settings | ConvertTo-Json -Depth 12
     [System.IO.File]::WriteAllText($settingsPath, $json, (New-Object System.Text.UTF8Encoding($false)))
+    $script:ILSettings = $true
     Print-Success "IL plugin marketplace registered"
     Print-Info "Default-on: gws, il-slides, key-behavior"
     Print-Info "Available on demand: gorilla-scripting, pipedrive"
@@ -349,7 +460,7 @@ function Ensure-IlClaudePlugins {
         Print-Info "Installing gws (Google Workspace) CLI..."
         npm install -g '@googleworkspace/cli' 2>$null
         Refresh-Path
-        if (Test-CommandExists "gws") { Print-Success "gws CLI installed" }
+        if (Test-CommandExists "gws") { Print-Success "gws CLI installed"; $script:ILGws = $true }
         else { Print-Warning "gws CLI install failed - run: npm install -g @googleworkspace/cli" }
     } else {
         Print-Warning "npm not available - skipping gws CLI install"
@@ -508,12 +619,14 @@ function Clone-AndSetupRepo($key) {
         Print-Info "Already cloned — pulling latest"
         Set-Location $target; git pull --ff-only 2>$null
     } else {
+        $createdDir = -not (Test-Path (Split-Path $target))
         gh repo clone $entry.slug $target
         if ($LASTEXITCODE -ne 0) {
             $script:Warnings += "Could not clone $($entry.slug) — check your GitHub access"
             Print-Error "Failed to clone $($entry.slug) (continuing)"
             return
         }
+        $script:ILRepos += [PSCustomObject]@{ path = $target; created_dir = $createdDir }
         Print-Success "Cloned $($entry.slug)"
     }
 
@@ -574,6 +687,7 @@ function Main {
     Ensure-Winget
     Ensure-Scoop
     Ensure-EarlyTools          # step 3
+    Capture-PriorState         # record pre-setup git identity + gh auth state
     Ensure-GitHubAuth          # step 4
     Ensure-GitIdentity
     Ensure-ClaudeCode          # step 5 (moved up; hardened in Task 8)
@@ -592,6 +706,7 @@ function Main {
     }
 
     Write-Host ""
+    Write-Receipt               # persist what this run changed (for the uninstaller)
     if (-not (Verify-Setup)) { Print-Warning "Setup completed with some issues" }
     Print-Completion
 }

@@ -31,6 +31,30 @@ irm https://raw.githubusercontent.com/ChaningJang/setup/main/bootstrap.ps1 | iex
 4. **Asks which repositories to clone** — the menu only shows repos your GitHub account can access.
 5. For **Irrational Labs HQ**, runs its full setup (media tools, Git LFS, dependencies, secrets). Other repos get a generic best-effort setup (dependencies, LFS, `.env` scaffold).
 
+## Uninstall / offboarding
+
+To reverse what setup added (e.g. when a consultant leaves), run:
+
+    curl -fsSL https://raw.githubusercontent.com/ChaningJang/setup/main/uninstall.sh | bash
+
+Windows (PowerShell):
+
+    irm https://raw.githubusercontent.com/ChaningJang/setup/main/uninstall.ps1 | iex
+
+It reads a receipt the installer wrote (`~/.config/il-setup/receipt.json`) and
+presents a menu:
+
+1. **Recommended** — remove the IL footprint & access: cloned repos, `gws` CLI +
+   Google credentials, IL Claude plugins, GitHub login, git identity, PATH edits.
+2. **Everything the script installed** — preset 1 plus Claude Code, the dev tools
+   the script installed, and Bun.
+3. **Custom** — pick categories one by one.
+
+It only removes tools the script itself installed (never ones that predated it),
+restores your previous git identity, and edits only the IL keys in
+`settings.json` — it never deletes `~/.claude`. Removing Homebrew entirely is
+available only via the custom picker, with a warning.
+
 ## Just the tools, or a specific repo
 
 Skip the menu with flags:
