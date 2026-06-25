@@ -97,6 +97,15 @@ test_remove_gws_dryrun() {
     rm -f "$IL_SETUP_RECEIPT"
 }
 
+test_remove_gws_skips_when_not_ours() {
+    export IL_SETUP_RECEIPT; IL_SETUP_RECEIPT="$(mktemp)"
+    echo '{"gws_cli_installed_by_us":false}' > "$IL_SETUP_RECEIPT"
+    load_receipt
+    local out; out="$(IL_DRY_RUN=1 remove_gws)"
+    assert_not_contains "$out" 'npm uninstall -g @googleworkspace/cli' "does NOT uninstall gws CLI when receipt says we did not install it" || fail=1
+    rm -f "$IL_SETUP_RECEIPT"
+}
+
 test_remove_github_auth_gated() {
     export IL_SETUP_RECEIPT; IL_SETUP_RECEIPT="$(mktemp)"
     echo '{"gh_was_authenticated_before":true}' > "$IL_SETUP_RECEIPT"
@@ -132,6 +141,7 @@ test_restore_git_identity_with_prior
 test_restore_git_identity_no_prior
 test_remove_repos_dryrun
 test_remove_gws_dryrun
+test_remove_gws_skips_when_not_ours
 test_remove_github_auth_gated
 test_remove_dev_tools_only_receipt_formulae
 exit $fail
