@@ -117,7 +117,10 @@ function Write-Receipt {
 }
 
 function Add-IlPathBlock([string]$ProfilePath, [string]$Line) {
-    if (-not (Test-Path $ProfilePath)) { New-Item -ItemType File -Path $ProfilePath -Force | Out-Null }
+    if (-not (Test-Path $ProfilePath)) {
+        New-Item -ItemType Directory -Path (Split-Path $ProfilePath) -Force | Out-Null
+        New-Item -ItemType File -Path $ProfilePath -Force | Out-Null
+    }
     if (Select-String -Path $ProfilePath -SimpleMatch "# >>> il-setup >>>" -Quiet) { return }
     Add-Content -Path $ProfilePath -Value "`n# >>> il-setup >>>`n$Line`n# <<< il-setup <<<"
     $script:ILPathFiles += $ProfilePath
@@ -196,7 +199,7 @@ function Ensure-EarlyTools {
     if (-not (Test-CommandExists "git")) {
         winget install --id Git.Git --accept-source-agreements --accept-package-agreements -e
         Refresh-Path
-        $script:ILFormulae += "Git.Git"
+        if (Test-CommandExists "git") { $script:ILFormulae += "Git.Git" }
     }
     if (Test-CommandExists "git") { Print-Success "git $(git --version)" }
     else { Print-Error "Git installation failed"; throw "Git is required" }
@@ -204,7 +207,7 @@ function Ensure-EarlyTools {
     if (-not (Test-CommandExists "git-lfs")) {
         winget install --id GitHub.GitLFS --accept-source-agreements --accept-package-agreements -e
         Refresh-Path
-        $script:ILFormulae += "GitHub.GitLFS"
+        if (Test-CommandExists "git-lfs") { $script:ILFormulae += "GitHub.GitLFS" }
     }
     git lfs install 2>$null | Out-Null
     Print-Success "git-lfs ready"
@@ -212,7 +215,7 @@ function Ensure-EarlyTools {
     if (-not (Test-CommandExists "gh")) {
         winget install --id GitHub.cli --accept-source-agreements --accept-package-agreements -e
         Refresh-Path
-        $script:ILFormulae += "GitHub.cli"
+        if (Test-CommandExists "gh") { $script:ILFormulae += "GitHub.cli" }
     }
     if (Test-CommandExists "gh") { Print-Success "gh installed" }
     else { Print-Warning "gh may need a terminal restart" }
@@ -220,7 +223,7 @@ function Ensure-EarlyTools {
     if (-not (Test-CommandExists "jq")) {
         scoop install jq 2>$null
         Refresh-Path
-        $script:ILFormulae += "jq"
+        if (Test-CommandExists "jq") { $script:ILFormulae += "jq" }
     }
     Print-Success "jq ready"
 
@@ -229,7 +232,7 @@ function Ensure-EarlyTools {
     if (-not (Test-CommandExists "npm")) {
         winget install --id OpenJS.NodeJS --accept-source-agreements --accept-package-agreements -e
         Refresh-Path
-        $script:ILFormulae += "OpenJS.NodeJS"
+        if (Test-CommandExists "npm") { $script:ILFormulae += "OpenJS.NodeJS" }
     }
     if (Test-CommandExists "npm") { Print-Success "node $(node --version) / npm $(npm --version)" }
     else { Print-Warning "Node may need a terminal restart" }
