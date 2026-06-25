@@ -53,6 +53,26 @@ categories_for_preset() {
     esac
 }
 
+# Remove only the IL keys this tool added; preserve all other settings.
+strip_il_settings() {
+    local file="$1"
+    [[ -f "$file" ]] || { print_info "No settings.json at $file — nothing to strip"; return 0; }
+    command_exists jq || { print_warning "jq unavailable — cannot edit settings.json safely"; return 0; }
+    local tmp; tmp="$(mktemp)"
+    if jq '
+        del(.extraKnownMarketplaces["irrational-labs-plugins"])
+        | del(.enabledPlugins["gws@irrational-labs-plugins"])
+        | del(.enabledPlugins["il-slides@irrational-labs-plugins"])
+        | del(.enabledPlugins["key-behavior@irrational-labs-plugins"])
+    ' "$file" > "$tmp" 2>/dev/null; then
+        mv "$tmp" "$file"
+        print_success "Removed IL marketplace + plugin keys from $(basename "$file")"
+    else
+        rm -f "$tmp"
+        print_warning "Could not edit $file"
+    fi
+}
+
 main() {
     echo ""
     echo -e "${BOLD}Irrational Labs — Uninstaller${NC}"
