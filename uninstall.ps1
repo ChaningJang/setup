@@ -44,6 +44,7 @@ function Strip-IlSettings([string]$File) {
 function Remove-IlPathBlock([string]$File) {
     if (-not (Test-Path $File)) { return }
     $lines = Get-Content $File
+    if (-not ($lines -match "# >>> il-setup >>>")) { return }
     $out = New-Object System.Collections.Generic.List[string]
     $skip = $false
     foreach ($l in $lines) {
@@ -64,8 +65,8 @@ function Restore-GitIdentity {
         if ($email) { Run-Cmd { git config --global user.email $email } "git config --global user.email $email" }
         Print-Success "Restored prior git identity"
     } else {
-        Run-Cmd { git config --global --unset user.name } "git config --global --unset user.name"
-        Run-Cmd { git config --global --unset user.email } "git config --global --unset user.email"
+        Run-Cmd { try { git config --global --unset user.name } catch {} } "git config --global --unset user.name"
+        Run-Cmd { try { git config --global --unset user.email } catch {} } "git config --global --unset user.email"
         Print-Success "Cleared git identity (none before setup)"
     }
 }
@@ -108,7 +109,10 @@ function Remove-Plugins { Strip-IlSettings (Join-Path $env:USERPROFILE ".claude\
 
 function Remove-PathEdits {
     if (Has-Receipt) { foreach ($p in @($script:Receipt.path_edits)) { if ($p) { Remove-IlPathBlock $p } } }
-    else { Remove-IlPathBlock $PROFILE }
+    else {
+        Remove-IlPathBlock $PROFILE.CurrentUserAllHosts
+        Remove-IlPathBlock $PROFILE
+    }
 }
 
 function Run-Category($id) {
