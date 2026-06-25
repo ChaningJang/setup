@@ -497,9 +497,7 @@ ensure_claude_code() {
     local wrote_any=false
     for shell_profile in "${profiles[@]}"; do
         if ! grep -qF '.local/bin' "$shell_profile" 2>/dev/null; then
-            echo "" >> "$shell_profile"
-            echo "# Claude Code" >> "$shell_profile"
-            echo "$path_line" >> "$shell_profile"
+            write_il_path_block "$shell_profile" "$path_line"
             print_success "Added ~/.local/bin to PATH in $(basename "$shell_profile")"
             wrote_any=true
         fi
@@ -815,6 +813,22 @@ write_receipt() {
         | (if (has("git_identity_prior")) then . else .git_identity_prior = {name: $gname, email: $gemail} end)
         | (if (has("gh_was_authenticated_before")) then . else .gh_was_authenticated_before = ($ghbefore == "true") end)
         ' "$path" > "$tmp" && mv "$tmp" "$path"
+}
+
+# Append a marker-delimited PATH block to a profile, once, and record it so the
+# uninstaller can remove exactly this block.
+write_il_path_block() {
+    local profile="$1" line="$2"
+    if grep -qF '# >>> il-setup >>>' "$profile" 2>/dev/null; then
+        return 0
+    fi
+    {
+        echo ""
+        echo "# >>> il-setup >>>"
+        echo "$line"
+        echo "# <<< il-setup <<<"
+    } >> "$profile"
+    record_path_profile "$profile"
 }
 
 # -----------------------------------------------------------------------------

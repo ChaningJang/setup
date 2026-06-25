@@ -69,7 +69,27 @@ test_capture_prior_state_preserves_on_rerun() {
     rm -rf "$tmphome" "$IL_SETUP_RECEIPT"
 }
 
+test_write_il_path_block() {
+    local prof; prof="$(mktemp)"
+    printf 'existing line\n' > "$prof"
+    IL_PATH_PROFILES=()
+    write_il_path_block "$prof" 'export PATH="$HOME/.local/bin:$PATH"'
+    local content; content="$(cat "$prof")"
+    assert_contains "$content" "# >>> il-setup >>>" "opening marker written"
+    assert_contains "$content" "# <<< il-setup <<<" "closing marker written"
+    assert_contains "$content" 'export PATH="$HOME/.local/bin:$PATH"' "path line written"
+    assert_contains "$content" "existing line" "existing content preserved"
+    assert_eq "$prof" "${IL_PATH_PROFILES[0]}" "profile recorded"
+
+    # Idempotent: second call must NOT add a second block
+    write_il_path_block "$prof" 'export PATH="$HOME/.local/bin:$PATH"'
+    local count; count="$(grep -c '# >>> il-setup >>>' "$prof")"
+    assert_eq "1" "$count" "block written only once"
+    rm -f "$prof"
+}
+
 test_write_receipt_basic
 test_capture_prior_state_first_run
 test_capture_prior_state_preserves_on_rerun
+test_write_il_path_block
 exit $fail
