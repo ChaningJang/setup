@@ -1146,8 +1146,8 @@ test_run_category_dispatch() {
     load_receipt
     local out; out="$(IL_DRY_RUN=1 run_category repos)"
     assert_contains "$out" 'DRYRUN: rm -rf /tmp/x' "run_category repos calls remove_repos" || fail=1
-    out="$(IL_DRY_RUN=1 run_category path)"
-    assert_contains "$out" "" "run_category path is a no-op with no path_edits (no crash)" || fail=1
+    out="$(IL_DRY_RUN=1 run_category bogus 2>&1)"
+    assert_contains "$out" 'Unknown category: bogus' "run_category rejects an unknown id" || fail=1
     rm -f "$IL_SETUP_RECEIPT"
 }
 ```
