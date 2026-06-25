@@ -28,6 +28,19 @@ REPOS_JSON=""          # loaded manifest (string)
 SELECTED_KEYS=()       # repo keys chosen to clone
 WARNINGS=()            # non-fatal issues, reprinted at the end
 
+# ---- Receipt state (what this run changed; written to disk by write_receipt) -
+IL_FORMULAE_INSTALLED=()   # brew formulae we installed this run
+IL_PATH_PROFILES=()        # shell profiles we added the il-setup PATH block to
+IL_REPOS_CLONED=()         # "path|created_dir" entries
+IL_BREW_INSTALLED=false
+IL_BUN_INSTALLED=false
+IL_CLAUDE_INSTALLED=false
+IL_GWS_INSTALLED=false
+IL_SETTINGS_TOUCHED=false
+IL_PRIOR_GIT_NAME=""
+IL_PRIOR_GIT_EMAIL=""
+IL_GH_AUTHED_BEFORE=""
+
 # Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -720,6 +733,57 @@ print_completion() {
     echo ""
 }
 
+il_receipt_path() {
+    echo "${IL_SETUP_RECEIPT:-$HOME/.config/il-setup/receipt.json}"
+}
+
+# Serialize in-memory receipt state to disk. Merges with any existing receipt so
+# re-runs accumulate; prior-state fields are written only if not already present.
+write_receipt() {
+    command_exists jq || { print_warning "jq unavailable — skipping setup receipt"; return 0; }
+    local path; path="$(il_receipt_path)"
+    mkdir -p "$(dirname "$path")"
+    [[ -f "$path" ]] || echo '{}' > "$path"
+
+    local formulae_json profiles_json repos_json
+    formulae_json="$(printf '%s\n' "${IL_FORMULAE_INSTALLED[@]:-}" | jq -R 'select(length>0)' | jq -s .)"
+    profiles_json="$(printf '%s\n' "${IL_PATH_PROFILES[@]:-}"   | jq -R 'select(length>0)' | jq -s .)"
+    repos_json="$(printf '%s\n' "${IL_REPOS_CLONED[@]:-}" \
+        | jq -R 'select(length>0) | split("|") | {path: .[0], created_dir: (.[1]=="true")}' | jq -s .)"
+
+    local tmp; tmp="$(mktemp)"
+    jq \
+        --argjson formulae "$formulae_json" \
+        --argjson profiles "$profiles_json" \
+        --argjson repos "$repos_json" \
+        --arg brew "$IL_BREW_INSTALLED" \
+        --arg bun "$IL_BUN_INSTALLED" \
+        --arg claude "$IL_CLAUDE_INSTALLED" \
+        --arg gws "$IL_GWS_INSTALLED" \
+        --arg settings "$IL_SETTINGS_TOUCHED" \
+        --arg gname "$IL_PRIOR_GIT_NAME" \
+        --arg gemail "$IL_PRIOR_GIT_EMAIL" \
+        --arg ghbefore "$IL_GH_AUTHED_BEFORE" \
+        '
+        .schema_version = 1
+        | .formulae_installed_by_us = (((.formulae_installed_by_us // []) + $formulae) | unique)
+        | .path_edits = (((.path_edits // []) + $profiles) | unique)
+        | .repos_cloned = (((.repos_cloned // []) + $repos) | unique_by(.path))
+        | .brew_installed_by_us       = ((.brew_installed_by_us // false)       or ($brew == "true"))
+        | .bun_installed_by_us        = ((.bun_installed_by_us // false)        or ($bun == "true"))
+        | .claude_code_installed_by_us= ((.claude_code_installed_by_us // false) or ($claude == "true"))
+        | .gws_cli_installed_by_us    = ((.gws_cli_installed_by_us // false)    or ($gws == "true"))
+        | (if ($settings == "true") then
+              .claude_settings = {marketplace: "irrational-labs-plugins",
+                                  plugins: ["gws@irrational-labs-plugins",
+                                            "il-slides@irrational-labs-plugins",
+                                            "key-behavior@irrational-labs-plugins"]}
+           else . end)
+        | (if (has("git_identity_prior")) then . else .git_identity_prior = {name: $gname, email: $gemail} end)
+        | (if (has("gh_was_authenticated_before")) then . else .gh_was_authenticated_before = ($ghbefore == "true") end)
+        ' "$path" > "$tmp" && mv "$tmp" "$path"
+}
+
 # -----------------------------------------------------------------------------
 # Main
 # -----------------------------------------------------------------------------
@@ -760,4 +824,7 @@ main() {
     print_completion
 }
 
-main "$@"
+# Only run main when executed directly — allows tests to source this file.
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    main "$@"
+fi
