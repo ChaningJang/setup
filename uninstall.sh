@@ -73,6 +73,20 @@ strip_il_settings() {
     fi
 }
 
+# Delete the il-setup marker block (inclusive) from a profile.
+remove_il_path_block() {
+    local file="$1"
+    [[ -f "$file" ]] || return 0
+    grep -qF '# >>> il-setup >>>' "$file" 2>/dev/null || { print_info "No il-setup PATH block in $(basename "$file")"; return 0; }
+    local tmp; tmp="$(mktemp)"
+    awk '
+        /# >>> il-setup >>>/ { skip=1 }
+        skip != 1 { print }
+        /# <<< il-setup <<</ { skip=0 }
+    ' "$file" > "$tmp" && mv "$tmp" "$file"
+    print_success "Removed il-setup PATH block from $(basename "$file")"
+}
+
 main() {
     echo ""
     echo -e "${BOLD}Irrational Labs — Uninstaller${NC}"

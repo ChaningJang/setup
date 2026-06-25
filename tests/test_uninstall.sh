@@ -40,6 +40,26 @@ JSON
     rm -f "$f"
 }
 
+test_remove_il_path_block() {
+    local f; f="$(mktemp)"
+    cat > "$f" <<'EOF'
+line before
+
+# >>> il-setup >>>
+export PATH="$HOME/.local/bin:$PATH"
+# <<< il-setup <<<
+line after
+EOF
+    remove_il_path_block "$f"
+    local content; content="$(cat "$f")"
+    assert_contains "$content" "line before" "content before block preserved" || fail=1
+    assert_contains "$content" "line after" "content after block preserved" || fail=1
+    assert_not_contains "$content" "il-setup" "markers removed" || fail=1
+    assert_not_contains "$content" ".local/bin" "path line removed" || fail=1
+    rm -f "$f"
+}
+
 test_preset_mapping
 test_strip_il_settings
+test_remove_il_path_block
 exit $fail
