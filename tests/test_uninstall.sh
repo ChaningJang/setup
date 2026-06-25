@@ -59,7 +59,28 @@ EOF
     rm -f "$f"
 }
 
+test_restore_git_identity_with_prior() {
+    export IL_SETUP_RECEIPT; IL_SETUP_RECEIPT="$(mktemp)"
+    echo '{"git_identity_prior":{"name":"Old Name","email":"old@x.com"}}' > "$IL_SETUP_RECEIPT"
+    load_receipt
+    local out; out="$(IL_DRY_RUN=1 restore_git_identity)"
+    assert_contains "$out" 'DRYRUN: git config --global user.email old@x.com' "restores prior email" || fail=1
+    assert_contains "$out" 'DRYRUN: git config --global user.name Old Name' "restores prior name" || fail=1
+    rm -f "$IL_SETUP_RECEIPT"
+}
+
+test_restore_git_identity_no_prior() {
+    export IL_SETUP_RECEIPT; IL_SETUP_RECEIPT="$(mktemp)"
+    echo '{"git_identity_prior":{"name":"","email":""}}' > "$IL_SETUP_RECEIPT"
+    load_receipt
+    local out; out="$(IL_DRY_RUN=1 restore_git_identity)"
+    assert_contains "$out" 'DRYRUN: git config --global --unset user.email' "unsets email when no prior" || fail=1
+    rm -f "$IL_SETUP_RECEIPT"
+}
+
 test_preset_mapping
 test_strip_il_settings
 test_remove_il_path_block
+test_restore_git_identity_with_prior
+test_restore_git_identity_no_prior
 exit $fail

@@ -87,6 +87,26 @@ remove_il_path_block() {
     print_success "Removed il-setup PATH block from $(basename "$file")"
 }
 
+# Restore prior git identity from the receipt, or unset if none existed.
+restore_git_identity() {
+    if [[ "$RECEIPT_FOUND" != true ]]; then
+        print_warning "No receipt — cannot restore prior git identity (skipping)"
+        return 0
+    fi
+    local name email
+    name="$(jq -r '.git_identity_prior.name // ""' "$RECEIPT_PATH")"
+    email="$(jq -r '.git_identity_prior.email // ""' "$RECEIPT_PATH")"
+    if [[ -n "$name" || -n "$email" ]]; then
+        [[ -n "$name" ]]  && run_cmd git config --global user.name "$name"
+        [[ -n "$email" ]] && run_cmd git config --global user.email "$email"
+        print_success "Restored prior git identity (${name:-} <${email:-}>)"
+    else
+        run_cmd git config --global --unset user.name || true
+        run_cmd git config --global --unset user.email || true
+        print_success "Cleared git identity (none existed before setup)"
+    fi
+}
+
 main() {
     echo ""
     echo -e "${BOLD}Irrational Labs — Uninstaller${NC}"
