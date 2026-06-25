@@ -134,6 +134,17 @@ test_remove_dev_tools_only_receipt_formulae() {
     rm -f "$IL_SETUP_RECEIPT"
 }
 
+test_run_category_dispatch() {
+    export IL_SETUP_RECEIPT; IL_SETUP_RECEIPT="$(mktemp)"
+    echo '{"repos_cloned":[{"path":"/tmp/x","created_dir":true}]}' > "$IL_SETUP_RECEIPT"
+    load_receipt
+    local out; out="$(IL_DRY_RUN=1 run_category repos)"
+    assert_contains "$out" 'DRYRUN: rm -rf /tmp/x' "run_category repos calls remove_repos" || fail=1
+    out="$(IL_DRY_RUN=1 run_category bogus 2>&1)"
+    assert_contains "$out" 'Unknown category: bogus' "run_category rejects an unknown id" || fail=1
+    rm -f "$IL_SETUP_RECEIPT"
+}
+
 test_preset_mapping
 test_strip_il_settings
 test_remove_il_path_block
@@ -144,4 +155,5 @@ test_remove_gws_dryrun
 test_remove_gws_skips_when_not_ours
 test_remove_github_auth_gated
 test_remove_dev_tools_only_receipt_formulae
+test_run_category_dispatch
 exit $fail

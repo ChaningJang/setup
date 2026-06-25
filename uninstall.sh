@@ -194,6 +194,46 @@ remove_homebrew() {
     fi
 }
 
+remove_plugins() {
+    strip_il_settings "$HOME/.claude/settings.json"
+}
+
+remove_path_edits() {
+    if [[ "$RECEIPT_FOUND" == true ]]; then
+        local n; n="$(jq -r '(.path_edits // []) | length' "$RECEIPT_PATH")"
+        local i p
+        for (( i=0; i<n; i++ )); do
+            p="$(jq -r ".path_edits[$i]" "$RECEIPT_PATH")"
+            [[ -n "$p" && "$p" != "null" ]] && remove_il_path_block "$p"
+        done
+    else
+        # Fallback: try the common profiles
+        remove_il_path_block "$HOME/.zshrc"
+        remove_il_path_block "$HOME/.bash_profile"
+    fi
+}
+
+run_category() {
+    case "$1" in
+        repos)    remove_repos ;;
+        gws)      remove_gws ;;
+        plugins)  remove_plugins ;;
+        gh)       remove_github_auth ;;
+        gitid)    restore_git_identity ;;
+        path)     remove_path_edits ;;
+        claude)   remove_claude_code ;;
+        devtools) remove_dev_tools ;;
+        brew)     remove_homebrew ;;
+        *)        print_warning "Unknown category: $1" ;;
+    esac
+}
+
+confirm() {
+    local prompt="$1" reply
+    read -r -p "$prompt [y/N] " reply
+    [[ "$reply" == "y" || "$reply" == "Y" ]]
+}
+
 main() {
     echo ""
     echo -e "${BOLD}Irrational Labs — Uninstaller${NC}"
@@ -201,9 +241,50 @@ main() {
     if [[ "$RECEIPT_FOUND" == true ]]; then
         print_info "Found setup receipt at $RECEIPT_PATH"
     else
-        print_warning "No setup receipt found — falling back to best-effort known-list mode"
+        print_warning "No receipt found — best-effort mode (won't touch dev tools; can't restore git identity)"
     fi
-    # menu + execution wired in Task 10
+
+    echo ""
+    echo "  1) Recommended — remove IL footprint & access (repos, gws, IL plugins, GitHub login, git identity, PATH)"
+    echo "  2) Everything the script installed (preset 1 + Claude Code, dev tools, Bun)"
+    echo "  3) Custom — choose categories"
+    echo "  4) Cancel"
+    echo ""
+    local choice cats=""
+    read -r -p "Choose [1]: " choice
+    choice="${choice:-1}"
+
+    case "$choice" in
+        1) cats="$(categories_for_preset 1)" ;;
+        2) cats="$(categories_for_preset 2)" ;;
+        3)
+            local all="repos gws plugins gh gitid path claude devtools brew" id
+            for id in $all; do
+                if confirm "Remove category '$id'?"; then cats="$cats $id"; fi
+            done
+            ;;
+        *) print_info "Cancelled."; return 0 ;;
+    esac
+
+    [[ -n "${cats// /}" ]] || { print_info "Nothing selected — cancelled."; return 0; }
+
+    echo ""
+    print_step "Will reverse:${cats}"
+    if ! confirm "Proceed?"; then print_info "Cancelled."; return 0; fi
+
+    local id
+    for id in $cats; do
+        run_category "$id" || WARNINGS+=("category '$id' had issues")
+    done
+
+    echo ""
+    if [[ ${#WARNINGS[@]} -gt 0 ]]; then
+        print_warning "Completed with warnings:"
+        local w; for w in "${WARNINGS[@]}"; do echo "  • $w"; done
+    else
+        print_success "Uninstall complete."
+    fi
+    print_info "Open a new terminal to drop the removed PATH entries."
 }
 
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
