@@ -11,9 +11,10 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y shellcheck && shellcheck -S warning bootstrap.sh uninstall.sh tests/lib/assert.sh tests/test_receipt.sh tests/test_uninstall.sh
       - name: Unit tests
         run: bash tests/test_receipt.sh && bash tests/test_uninstall.sh
-      - name: PSScriptAnalyzer bootstrap.ps1
+      - name: PSScriptAnalyzer
         shell: pwsh
         run: |
           Install-Module PSScriptAnalyzer -Force -Scope CurrentUser
-          $r = Invoke-ScriptAnalyzer -Path bootstrap.ps1,uninstall.ps1 -Severity Error
+          # -Path takes a single String, so analyze each script and combine results.
+          $r = @('bootstrap.ps1','uninstall.ps1') | ForEach-Object { Invoke-ScriptAnalyzer -Path $_ -Severity Error }
           if ($r) { $r | Format-Table; exit 1 }
