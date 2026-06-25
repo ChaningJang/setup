@@ -145,6 +145,7 @@ ensure_homebrew() {
             fi
         fi
         print_success "Homebrew installed"
+        IL_BREW_INSTALLED=true
     fi
 
     # Ensure brew is in PATH for this session
@@ -156,23 +157,23 @@ ensure_homebrew() {
 ensure_early_tools() {
     print_step "Installing core tools (git, git-lfs, gh, jq, node, bun)..."
 
-    command_exists git     || { print_info "Installing git...";     brew install git; }
+    if ! command_exists git;     then print_info "Installing git...";     brew install git     && record_formula_installed git;     fi
     print_success "git $(git --version | cut -d' ' -f3)"
 
-    command_exists git-lfs || { print_info "Installing git-lfs..."; brew install git-lfs; }
+    if ! command_exists git-lfs; then print_info "Installing git-lfs..."; brew install git-lfs && record_formula_installed git-lfs; fi
     git lfs install >/dev/null 2>&1
     print_success "git-lfs ready"
 
-    command_exists gh      || { print_info "Installing GitHub CLI..."; brew install gh; }
+    if ! command_exists gh;      then print_info "Installing GitHub CLI..."; brew install gh   && record_formula_installed gh;      fi
     print_success "gh $(gh --version | head -1 | cut -d' ' -f3)"
 
-    command_exists jq      || { print_info "Installing jq...";      brew install jq; }
+    if ! command_exists jq;      then print_info "Installing jq...";      brew install jq      && record_formula_installed jq;      fi
     print_success "jq ready"
 
     # Node gives us npm, which we need to install global CLI tools like the
     # gws (Google Workspace) CLI in ensure_il_claude_plugins. The Homebrew
     # node formula bundles npm, so this single install covers both.
-    command_exists npm     || { print_info "Installing Node (provides npm)..."; brew install node; }
+    if ! command_exists npm;     then print_info "Installing Node (provides npm)..."; brew install node && record_formula_installed node; fi
     print_success "node $(node --version) / npm $(npm --version)"
 
     if command_exists bun; then
@@ -184,6 +185,7 @@ ensure_early_tools() {
         export PATH="$BUN_INSTALL/bin:$PATH"
         if command_exists bun; then
             print_success "bun $(bun --version)"
+            IL_BUN_INSTALLED=true
         else
             print_error "Bun installation failed"
             exit 1
@@ -428,12 +430,16 @@ clone_and_setup_repo() {
         print_info "Already cloned at $target — pulling latest"
         ( cd "$target" && git pull --ff-only ) || true
     else
-        mkdir -p "$(dirname "$target")"
+        local parent created_dir=false
+        parent="$(dirname "$target")"
+        [[ -d "$parent" ]] || created_dir=true
+        mkdir -p "$parent"
         if ! gh repo clone "$slug" "$target"; then
             WARNINGS+=("Could not clone $slug — check your GitHub access")
             print_error "Failed to clone $slug (continuing)"
             return 0
         fi
+        record_repo_cloned "$target" "$created_dir"
         print_success "Cloned $slug"
     fi
 
@@ -461,6 +467,7 @@ ensure_claude_code() {
 
         if command_exists claude; then
             print_success "Claude Code installed"
+            IL_CLAUDE_INSTALLED=true
         else
             print_error "Claude Code installation failed"
             print_info "Please try manually: curl -fsSL https://claude.ai/install.sh | bash"
@@ -545,6 +552,7 @@ ensure_il_claude_plugins() {
       | .enabledPlugins["il-slides@irrational-labs-plugins"]    |= (if . == null then true else . end)
       | .enabledPlugins["key-behavior@irrational-labs-plugins"] |= (if . == null then true else . end)
     ' "$settings" > "$tmp" && mv "$tmp" "$settings"
+    IL_SETTINGS_TOUCHED=true
 
     print_success "IL plugin marketplace registered"
     print_info "Default-on: gws, il-slides, key-behavior"
@@ -562,6 +570,7 @@ ensure_il_claude_plugins() {
         if npm install -g @googleworkspace/cli >/dev/null 2>&1; then
             hash -r 2>/dev/null || true
             print_success "gws CLI installed"
+            IL_GWS_INSTALLED=true
         else
             print_warning "gws CLI install failed"
             WARNINGS+=("gws CLI not installed — run: npm install -g @googleworkspace/cli")
@@ -824,6 +833,7 @@ main() {
     ensure_xcode_cli
     ensure_homebrew
     ensure_early_tools          # step 3: git, git-lfs, gh, jq, bun
+    capture_prior_state         # record pre-setup git identity + gh auth state
     ensure_github_auth          # step 4
     ensure_git_identity
     ensure_claude_code          # step 5: Claude available before anything that can fail
@@ -844,6 +854,7 @@ main() {
     fi
 
     echo ""
+    write_receipt               # persist what this run changed (for the uninstaller)
     verify_setup || print_warning "Setup completed with some issues"
     print_completion
 }
