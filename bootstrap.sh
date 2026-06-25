@@ -737,6 +737,30 @@ il_receipt_path() {
     echo "${IL_SETUP_RECEIPT:-$HOME/.config/il-setup/receipt.json}"
 }
 
+record_formula_installed() { IL_FORMULAE_INSTALLED+=("$1"); }
+record_path_profile()      { IL_PATH_PROFILES+=("$1"); }
+record_repo_cloned()       { IL_REPOS_CLONED+=("$1|$2"); }   # path, created_dir(true/false)
+
+# Read state we are about to overwrite. Prefer values already saved in the
+# receipt (so re-runs keep the ORIGINAL pre-setup state), else read live.
+capture_prior_state() {
+    local path; path="$(il_receipt_path)"
+    if command_exists jq && [[ -f "$path" ]] && [[ "$(jq -r 'has("git_identity_prior")' "$path" 2>/dev/null)" == "true" ]]; then
+        IL_PRIOR_GIT_NAME="$(jq -r '.git_identity_prior.name // ""' "$path")"
+        IL_PRIOR_GIT_EMAIL="$(jq -r '.git_identity_prior.email // ""' "$path")"
+    else
+        IL_PRIOR_GIT_NAME="$(git config --global user.name 2>/dev/null || echo "")"
+        IL_PRIOR_GIT_EMAIL="$(git config --global user.email 2>/dev/null || echo "")"
+    fi
+    if command_exists jq && [[ -f "$path" ]] && [[ "$(jq -r 'has("gh_was_authenticated_before")' "$path" 2>/dev/null)" == "true" ]]; then
+        IL_GH_AUTHED_BEFORE="$(jq -r '.gh_was_authenticated_before' "$path")"
+    elif gh auth status >/dev/null 2>&1; then
+        IL_GH_AUTHED_BEFORE="true"
+    else
+        IL_GH_AUTHED_BEFORE="false"
+    fi
+}
+
 # Serialize in-memory receipt state to disk. Merges with any existing receipt so
 # re-runs accumulate; prior-state fields are written only if not already present.
 write_receipt() {

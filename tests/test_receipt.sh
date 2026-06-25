@@ -40,5 +40,36 @@ test_write_receipt_basic() {
     rm -f "$IL_SETUP_RECEIPT"
 }
 
+test_capture_prior_state_first_run() {
+    export IL_SETUP_RECEIPT; IL_SETUP_RECEIPT="$(mktemp)"; rm -f "$IL_SETUP_RECEIPT"
+    # Fake a git identity via a temp HOME gitconfig
+    local tmphome; tmphome="$(mktemp -d)"
+    HOME="$tmphome" git config --global user.name "Pre Existing" 2>/dev/null
+    HOME="$tmphome" git config --global user.email "pre@host.com" 2>/dev/null
+    ( export HOME="$tmphome"
+      IL_PRIOR_GIT_NAME=""; IL_PRIOR_GIT_EMAIL=""; IL_GH_AUTHED_BEFORE=""
+      capture_prior_state
+      assert_eq "Pre Existing" "$IL_PRIOR_GIT_NAME" "captures live name on first run"
+      assert_eq "pre@host.com" "$IL_PRIOR_GIT_EMAIL" "captures live email on first run" ) || fail=1
+    rm -rf "$tmphome" "$IL_SETUP_RECEIPT"
+}
+
+test_capture_prior_state_preserves_on_rerun() {
+    export IL_SETUP_RECEIPT; IL_SETUP_RECEIPT="$(mktemp)"
+    # A receipt already recording the ORIGINAL identity
+    echo '{"git_identity_prior":{"name":"Original","email":"orig@x.com"},"gh_was_authenticated_before":true}' > "$IL_SETUP_RECEIPT"
+    local tmphome; tmphome="$(mktemp -d)"
+    # Live identity is now the IL one — must NOT overwrite the saved original
+    HOME="$tmphome" git config --global user.email "now-il@irrationallabs.com" 2>/dev/null
+    ( export HOME="$tmphome"
+      IL_PRIOR_GIT_NAME=""; IL_PRIOR_GIT_EMAIL=""; IL_GH_AUTHED_BEFORE=""
+      capture_prior_state
+      assert_eq "orig@x.com" "$IL_PRIOR_GIT_EMAIL" "preserves original email on re-run"
+      assert_eq "true" "$IL_GH_AUTHED_BEFORE" "preserves gh-before on re-run" ) || fail=1
+    rm -rf "$tmphome" "$IL_SETUP_RECEIPT"
+}
+
 test_write_receipt_basic
+test_capture_prior_state_first_run
+test_capture_prior_state_preserves_on_rerun
 exit $fail
