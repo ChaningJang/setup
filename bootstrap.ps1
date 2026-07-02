@@ -253,6 +253,36 @@ function Ensure-EarlyTools {
     }
 }
 
+function Ensure-LongPaths {
+    Print-Step "Enabling long-path support..."
+
+    # Git for Windows honors core.longpaths=true by switching to the
+    # extended-length (\\?\) path API, so clone/checkout of deeply nested repos
+    # succeeds past the legacy 260-character MAX_PATH limit. HQ has paths well
+    # over that — without this, the checkout aborts partway and the clone looks
+    # like an access/permissions failure when it is really a path-length one.
+    # Must run AFTER git is installed and BEFORE any repo is cloned.
+    git config --global core.longpaths true 2>$null
+    Print-Success "Git long-path support enabled (core.longpaths=true)"
+
+    # Best-effort: flip the OS-wide flag so non-Git tools (node/bun reading deep
+    # paths, Explorer, etc.) also cope. Needs admin — skip quietly if we can't
+    # write HKLM; Git's own long-path support is enough for the clone itself.
+    try {
+        $fs  = "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem"
+        $cur = (Get-ItemProperty -Path $fs -Name LongPathsEnabled -ErrorAction SilentlyContinue).LongPathsEnabled
+        if ($cur -ne 1) {
+            Set-ItemProperty -Path $fs -Name LongPathsEnabled -Value 1 -Type DWord -ErrorAction Stop
+            Print-Success "Enabled OS-wide long paths (LongPathsEnabled=1)"
+        } else {
+            Print-Success "OS-wide long paths already enabled"
+        }
+    } catch {
+        Print-Info "Couldn't set OS-wide long paths (needs admin) — Git long paths cover the clone"
+        $script:Warnings += "OS-wide long paths not enabled (needs admin). If a tool later complains about long file names, open PowerShell as Administrator and run: Set-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem' LongPathsEnabled 1"
+    }
+}
+
 function Ensure-GitHubAuth {
     Print-Step "Checking GitHub authentication..."
 
@@ -588,13 +618,13 @@ function Setup-Generic($dir) {
     Set-Location $dir
     if (Test-Path "package.json") {
         Print-Info "Found package.json — running bun install"
-        try { bun install } catch { $script:Warnings += "$base: bun install failed" }
+        try { bun install } catch { $script:Warnings += "${base}: bun install failed" }
     }
     if ((Test-Path ".gitattributes") -and (Select-String -Path ".gitattributes" -Pattern "filter=lfs" -Quiet)) {
         Print-Info "Repo uses Git LFS — pulling LFS files"
         git lfs install --local 2>$null | Out-Null
         git lfs pull
-        if ($LASTEXITCODE -ne 0) { $script:Warnings += "$base: git lfs pull failed" }
+        if ($LASTEXITCODE -ne 0) { $script:Warnings += "${base}: git lfs pull failed" }
     }
     if (-not (Test-Path ".env")) {
         $example = $null
@@ -603,7 +633,7 @@ function Setup-Generic($dir) {
         if ($example) {
             Copy-Item $example ".env"
             Print-Info "Created .env from $example — fill in secrets before use"
-            $script:Warnings += "$base: created .env from $example — needs your secrets"
+            $script:Warnings += "${base}: created .env from $example — needs your secrets"
         }
     }
     Print-Success "$base ready — check its README for any extra setup"
@@ -622,8 +652,9 @@ function Clone-AndSetupRepo($key) {
         $createdDir = -not (Test-Path (Split-Path $target))
         gh repo clone $entry.slug $target
         if ($LASTEXITCODE -ne 0) {
-            $script:Warnings += "Could not clone $($entry.slug) — check your GitHub access"
+            $script:Warnings += "Could not clone $($entry.slug) — check your GitHub access, or a long-path/filename error (see the git output above)"
             Print-Error "Failed to clone $($entry.slug) (continuing)"
+            Print-Info "If git reported 'Filename too long', long-path support may not have applied — open a new terminal and re-run this script."
             return
         }
         $script:ILRepos += [PSCustomObject]@{ path = $target; created_dir = $createdDir }
@@ -687,6 +718,7 @@ function Main {
     Ensure-Winget
     Ensure-Scoop
     Ensure-EarlyTools          # step 3
+    Ensure-LongPaths           # Windows MAX_PATH fix — must precede any clone
     Capture-PriorState         # record pre-setup git identity + gh auth state
     Ensure-GitHubAuth          # step 4
     Ensure-GitIdentity
