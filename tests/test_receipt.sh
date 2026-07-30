@@ -18,7 +18,6 @@ test_write_receipt_basic() {
     IL_BUN_INSTALLED=true
     IL_CLAUDE_INSTALLED=false
     IL_GWS_INSTALLED=true
-    IL_SETTINGS_TOUCHED=true
     IL_PATH_PROFILES=("$HOME/.zshrc")
     IL_REPOS_CLONED=("$HOME/irrational_labs_hq|true")
     IL_PRIOR_GIT_NAME="Old Name"
@@ -31,7 +30,6 @@ test_write_receipt_basic() {
     assert_json "$IL_SETUP_RECEIPT" '.formulae_installed_by_us | sort | join(",")' 'ffmpeg,node' 'formulae recorded' || fail=1
     assert_json "$IL_SETUP_RECEIPT" '.bun_installed_by_us' 'true' 'bun flag' || fail=1
     assert_json "$IL_SETUP_RECEIPT" '.gws_cli_installed_by_us' 'true' 'gws flag' || fail=1
-    assert_json "$IL_SETUP_RECEIPT" '.claude_settings.marketplace' 'irrational-labs-plugins' 'settings recorded' || fail=1
     assert_json "$IL_SETUP_RECEIPT" '.path_edits[0]' "$HOME/.zshrc" 'path edit recorded' || fail=1
     assert_json "$IL_SETUP_RECEIPT" '.repos_cloned[0].path' "$HOME/irrational_labs_hq" 'repo path recorded' || fail=1
     assert_json "$IL_SETUP_RECEIPT" '.repos_cloned[0].created_dir' 'true' 'repo created_dir recorded' || fail=1

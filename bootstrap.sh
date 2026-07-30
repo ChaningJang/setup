@@ -36,7 +36,6 @@ IL_BREW_INSTALLED=false
 IL_BUN_INSTALLED=false
 IL_CLAUDE_INSTALLED=false
 IL_GWS_INSTALLED=false
-IL_SETTINGS_TOUCHED=false
 IL_PRIOR_GIT_NAME=""
 IL_PRIOR_GIT_EMAIL=""
 IL_GH_AUTHED_BEFORE=""
@@ -171,7 +170,7 @@ ensure_early_tools() {
     print_success "jq ready"
 
     # Node gives us npm, which we need to install global CLI tools like the
-    # gws (Google Workspace) CLI in ensure_il_claude_plugins. The Homebrew
+    # gws (Google Workspace) CLI in ensure_gws_cli. The Homebrew
     # node formula bundles npm, so this single install covers both.
     if ! command_exists npm;     then print_info "Installing Node (provides npm)..."; brew install node && record_formula_installed node; fi
     print_success "node $(node --version) / npm $(npm --version)"
@@ -524,51 +523,19 @@ ensure_claude_code() {
     fi
 }
 
-ensure_il_claude_plugins() {
-    print_step "Setting up Irrational Labs Claude Code plugins..."
+ensure_gws_cli() {
+    print_step "Setting up the gws (Google Workspace) CLI..."
 
-    local claude_dir="$HOME/.claude"
-    local settings="$claude_dir/settings.json"
-
-    mkdir -p "$claude_dir"
-    [[ -f "$settings" ]] || echo '{}' > "$settings"
-
-    if ! command_exists jq; then
-        print_warning "jq not available — skipping plugin setup"
-        return 0
-    fi
-
-    # Marketplace registration is always (re)set — registering it is the
-    # baseline requirement for everything else here. Per-plugin enabled flags
-    # use |= with a null-check so we only set defaults the FIRST time the
-    # bootstrap runs. If a teammate has explicitly disabled a plugin
-    # (enabledPlugins[...] = false), re-running the bootstrap leaves their
-    # decision intact.
-    local tmp
-    tmp=$(mktemp)
-
-    jq '
-      .extraKnownMarketplaces["irrational-labs-plugins"] = {
-        "source": {
-          "source": "github",
-          "repo": "IrrationalLabs-team/knowledge-work-plugins"
-        }
-      }
-      | .enabledPlugins["gws@irrational-labs-plugins"]          |= (if . == null then true else . end)
-      | .enabledPlugins["il-slides@irrational-labs-plugins"]    |= (if . == null then true else . end)
-      | .enabledPlugins["key-behavior@irrational-labs-plugins"] |= (if . == null then true else . end)
-    ' "$settings" > "$tmp" && mv "$tmp" "$settings"
-    IL_SETTINGS_TOUCHED=true
-
-    print_success "IL plugin marketplace registered"
-    print_info "Default-on: gws, il-slides, key-behavior"
-    print_info "Available on demand: gorilla-scripting, pipedrive"
-    print_info "  install with: /plugin install <name>@irrational-labs-plugins"
-    print_info "(default plugins auto-install on next 'claude' launch)"
-
-    # The gws plugin/skill drives the `gws` Google Workspace CLI — a separate
-    # npm package. Install it globally so /gws:setup works out of the box.
-    # (npm is guaranteed by ensure_early_tools, which runs earlier in main.)
+    # IL Claude Code plugins (gws, il-slides, key-behavior, il-qol, ...) are
+    # distributed by the IL claude.ai org — "Installed by default" in the admin
+    # Plugins panel — so this script no longer registers the marketplace or
+    # enables plugins locally. They arrive on their own once the teammate signs
+    # in to Claude Code with their @irrationallabs.com account.
+    #
+    # What the org CANNOT push is the `gws` Google Workspace CLI itself — a
+    # separate npm package the gws plugin drives. Install it globally so
+    # /gws:setup works out of the box. (npm is guaranteed by
+    # ensure_early_tools, which runs earlier in main.)
     if command_exists gws; then
         print_success "gws CLI $(gws --version 2>/dev/null | head -1 | cut -d' ' -f2)"
     elif command_exists npm; then
@@ -585,7 +552,8 @@ ensure_il_claude_plugins() {
         print_warning "npm not available — skipping gws CLI install"
         WARNINGS+=("gws CLI not installed (npm missing) — run: npm install -g @googleworkspace/cli")
     fi
-    print_info "After restart, run /gws:setup and sign in with your @irrationallabs.com account"
+    print_info "IL plugins (gws, il-slides, ...) arrive automatically on first Claude launch — org-managed"
+    print_info "After that, run /gws:setup and sign in with your @irrationallabs.com account"
 }
 
 load_manifest() {
@@ -799,7 +767,6 @@ write_receipt() {
         --arg bun "$IL_BUN_INSTALLED" \
         --arg claude "$IL_CLAUDE_INSTALLED" \
         --arg gws "$IL_GWS_INSTALLED" \
-        --arg settings "$IL_SETTINGS_TOUCHED" \
         --arg gname "$IL_PRIOR_GIT_NAME" \
         --arg gemail "$IL_PRIOR_GIT_EMAIL" \
         --arg ghbefore "$IL_GH_AUTHED_BEFORE" \
@@ -812,12 +779,6 @@ write_receipt() {
         | .bun_installed_by_us        = ((.bun_installed_by_us // false)        or ($bun == "true"))
         | .claude_code_installed_by_us= ((.claude_code_installed_by_us // false) or ($claude == "true"))
         | .gws_cli_installed_by_us    = ((.gws_cli_installed_by_us // false)    or ($gws == "true"))
-        | (if ($settings == "true") then
-              .claude_settings = {marketplace: "irrational-labs-plugins",
-                                  plugins: ["gws@irrational-labs-plugins",
-                                            "il-slides@irrational-labs-plugins",
-                                            "key-behavior@irrational-labs-plugins"]}
-           else . end)
         | (if (has("git_identity_prior")) then . else .git_identity_prior = {name: $gname, email: $gemail} end)
         | (if (has("gh_was_authenticated_before")) then . else .gh_was_authenticated_before = ($ghbefore == "true") end)
         ' "$path" > "$tmp" && mv "$tmp" "$path"
@@ -859,7 +820,7 @@ main() {
     ensure_github_auth          # step 4
     ensure_git_identity
     ensure_claude_code          # step 5: Claude available before anything that can fail
-    ensure_il_claude_plugins
+    ensure_gws_cli
     load_manifest               # step 6
     select_repos
     install_shell_helpers       # step 7

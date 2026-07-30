@@ -35,7 +35,6 @@ $script:ILBrew       = $false     # n/a on Windows; kept for schema parity
 $script:ILBun        = $false
 $script:ILClaude     = $false
 $script:ILGws        = $false
-$script:ILSettings   = $false
 $script:ILPriorGitName  = ""
 $script:ILPriorGitEmail = ""
 $script:ILGhBefore      = $null
@@ -95,10 +94,9 @@ function Write-Receipt {
         claude_code_installed_by_us= ((_bool $existing 'claude_code_installed_by_us') -or $script:ILClaude)
         gws_cli_installed_by_us    = ((_bool $existing 'gws_cli_installed_by_us') -or $script:ILGws)
     }
-    if ($script:ILSettings) {
-        $receipt.claude_settings = [ordered]@{ marketplace = "irrational-labs-plugins";
-            plugins = @("gws@irrational-labs-plugins","il-slides@irrational-labs-plugins","key-behavior@irrational-labs-plugins") }
-    } elseif ($existing.PSObject.Properties.Name -contains 'claude_settings') {
+    if ($existing.PSObject.Properties.Name -contains 'claude_settings') {
+        # Preserved for machines bootstrapped before plugin distribution moved
+        # to the claude.ai org backend — the uninstaller still cleans them up.
         $receipt.claude_settings = $existing.claude_settings
     }
     if ($existing.PSObject.Properties.Name -contains 'git_identity_prior') {
@@ -228,7 +226,7 @@ function Ensure-EarlyTools {
     Print-Success "jq ready"
 
     # Node gives us npm, needed to install global CLI tools like the gws
-    # (Google Workspace) CLI in Ensure-IlClaudePlugins.
+    # (Google Workspace) CLI in Ensure-GwsCli.
     if (-not (Test-CommandExists "npm")) {
         winget install --id OpenJS.NodeJS --accept-source-agreements --accept-package-agreements -e
         Refresh-Path
@@ -430,60 +428,18 @@ function Ensure-ClaudeCode {
     }
 }
 
-function Ensure-IlClaudePlugins {
-    Print-Step "Setting up Irrational Labs Claude Code plugins..."
+function Ensure-GwsCli {
+    Print-Step "Setting up the gws (Google Workspace) CLI..."
 
-    $claudeDir = "$HOME\.claude"
-    $settingsPath = "$claudeDir\settings.json"
-    if (-not (Test-Path $claudeDir)) { New-Item -ItemType Directory -Path $claudeDir -Force | Out-Null }
-
-    if (Test-Path $settingsPath) {
-        try { $settings = Get-Content -Raw $settingsPath | ConvertFrom-Json }
-        catch { $settings = [PSCustomObject]@{} }
-    } else {
-        $settings = [PSCustomObject]@{}
-    }
-
-    # Helper to ensure a property exists on a PSCustomObject
-    function Ensure-Prop($obj, $name, $value) {
-        if (-not ($obj.PSObject.Properties.Name -contains $name)) {
-            $obj | Add-Member -NotePropertyName $name -NotePropertyValue $value
-        }
-    }
-
-    # Marketplace registration is always (re)set.
-    $marketplace = [PSCustomObject]@{
-        source = [PSCustomObject]@{
-            source = "github"
-            repo   = "IrrationalLabs-team/knowledge-work-plugins"
-        }
-    }
-    Ensure-Prop $settings "extraKnownMarketplaces" ([PSCustomObject]@{})
-    if ($settings.extraKnownMarketplaces.PSObject.Properties.Name -contains "irrational-labs-plugins") {
-        $settings.extraKnownMarketplaces."irrational-labs-plugins" = $marketplace
-    } else {
-        $settings.extraKnownMarketplaces | Add-Member -NotePropertyName "irrational-labs-plugins" -NotePropertyValue $marketplace
-    }
-
-    # Default-on plugins — only set when the key is absent (preserve explicit disables).
-    Ensure-Prop $settings "enabledPlugins" ([PSCustomObject]@{})
-    foreach ($p in @("gws@irrational-labs-plugins","il-slides@irrational-labs-plugins","key-behavior@irrational-labs-plugins")) {
-        if (-not ($settings.enabledPlugins.PSObject.Properties.Name -contains $p)) {
-            $settings.enabledPlugins | Add-Member -NotePropertyName $p -NotePropertyValue $true
-        }
-    }
-
-    # Write BOM-free UTF-8 (Set-Content -Encoding UTF8 emits a BOM on Windows
-    # PowerShell 5.1, which can break JSON parsers reading settings.json).
-    $json = $settings | ConvertTo-Json -Depth 12
-    [System.IO.File]::WriteAllText($settingsPath, $json, (New-Object System.Text.UTF8Encoding($false)))
-    $script:ILSettings = $true
-    Print-Success "IL plugin marketplace registered"
-    Print-Info "Default-on: gws, il-slides, key-behavior"
-    Print-Info "Available on demand: gorilla-scripting, pipedrive"
-
-    # The gws plugin drives the `gws` Google Workspace CLI (a separate npm
-    # package). Install it globally so /gws:setup works out of the box.
+    # IL Claude Code plugins (gws, il-slides, key-behavior, il-qol, ...) are
+    # distributed by the IL claude.ai org — "Installed by default" in the admin
+    # Plugins panel — so this script no longer registers the marketplace or
+    # enables plugins locally. They arrive on their own once the teammate signs
+    # in to Claude Code with their @irrationallabs.com account.
+    #
+    # What the org CANNOT push is the `gws` Google Workspace CLI itself — a
+    # separate npm package the gws plugin drives. Install it globally so
+    # /gws:setup works out of the box.
     if (Test-CommandExists "gws") {
         Print-Success "gws CLI already installed"
     } elseif (Test-CommandExists "npm") {
@@ -495,7 +451,8 @@ function Ensure-IlClaudePlugins {
     } else {
         Print-Warning "npm not available - skipping gws CLI install"
     }
-    Print-Info "After restart, run /gws:setup and sign in with your @irrationallabs.com account"
+    Print-Info "IL plugins (gws, il-slides, ...) arrive automatically on first Claude launch - org-managed"
+    Print-Info "After that, run /gws:setup and sign in with your @irrationallabs.com account"
 }
 
 function Load-Manifest {
@@ -723,7 +680,7 @@ function Main {
     Ensure-GitHubAuth          # step 4
     Ensure-GitIdentity
     Ensure-ClaudeCode          # step 5 (moved up; hardened in Task 8)
-    Ensure-IlClaudePlugins     # step 5 (new in Task 8)
+    Ensure-GwsCli              # step 5 (plugins now org-managed; CLI still local)
     Load-Manifest              # step 6
     Select-Repos
     Install-ShellHelpers       # step 7
