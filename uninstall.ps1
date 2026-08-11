@@ -36,6 +36,9 @@ function Strip-IlSettings([string]$File) {
             $s.enabledPlugins.PSObject.Properties.Remove($k)
         }
     }
+    if ($s.PSObject.Properties.Name -contains "env") {
+        $s.env.PSObject.Properties.Remove("GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND")
+    }
     $json = $s | ConvertTo-Json -Depth 12
     [System.IO.File]::WriteAllText($File, $json, (New-Object System.Text.UTF8Encoding($false)))
     Print-Success "Removed IL keys from settings.json"
@@ -79,11 +82,21 @@ function Remove-Repos {
 }
 
 function Remove-Gws {
+    # Keep the safe keyring backend set for the logout itself — logging out on
+    # the default backend is the same path that silently eats credentials.
+    $env:GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND = "file"
     if (Test-CommandExists "gws") { Run-Cmd { gws auth logout } "gws auth logout"; Print-Success "Cleared gws credentials" }
     if ((Has-Receipt) -and -not (R-Bool "gws_cli_installed_by_us")) { Print-Info "gws CLI not installed by setup — leaving it" }
     elseif (Test-CommandExists "npm") { Run-Cmd { npm uninstall -g '@googleworkspace/cli' } "npm uninstall -g @googleworkspace/cli"; Print-Success "Uninstalled gws CLI" }
     $cfg = if ($env:GOOGLE_WORKSPACE_CLI_CONFIG_DIR) { $env:GOOGLE_WORKSPACE_CLI_CONFIG_DIR } else { Join-Path $env:USERPROFILE ".config\gws" }
     if (Test-Path $cfg) { Run-Cmd { Remove-Item -Recurse -Force $cfg } "Remove-Item $cfg"; Print-Success "Removed leftover gws config" }
+    # Only clear the persistent user env var if setup is what set it.
+    if ((-not (Has-Receipt)) -or (R-Bool "gws_env_set_by_us")) {
+        if ([Environment]::GetEnvironmentVariable("GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND", "User")) {
+            Run-Cmd { [Environment]::SetEnvironmentVariable("GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND", $null, "User") } "clear GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND (User)"
+            Print-Success "Cleared the gws keyring env var"
+        }
+    } else { Print-Info "Keyring env var predates setup — leaving it" }
 }
 
 function Remove-GitHubAuth {

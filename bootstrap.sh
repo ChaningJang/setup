@@ -31,11 +31,13 @@ WARNINGS=()            # non-fatal issues, reprinted at the end
 # ---- Receipt state (what this run changed; written to disk by write_receipt) -
 IL_FORMULAE_INSTALLED=()   # brew formulae we installed this run
 IL_PATH_PROFILES=()        # shell profiles we added the il-setup PATH block to
+IL_GWS_ENV_PROFILES=()     # shell profiles we added the il-setup:gws env block to
 IL_REPOS_CLONED=()         # "path|created_dir" entries
 IL_BREW_INSTALLED=false
 IL_BUN_INSTALLED=false
 IL_CLAUDE_INSTALLED=false
 IL_GWS_INSTALLED=false
+IL_SETTINGS_TOUCHED=false  # we wrote IL keys into ~/.claude/settings.json
 IL_PRIOR_GIT_NAME=""
 IL_PRIOR_GIT_EMAIL=""
 IL_GH_AUTHED_BEFORE=""
@@ -523,18 +525,136 @@ ensure_claude_code() {
     fi
 }
 
+# -----------------------------------------------------------------------------
+# gws (Google Workspace) — the whole stack, installed here rather than assumed
+# -----------------------------------------------------------------------------
+# A working gws needs THREE things, and a teammate is broken if any one of them
+# is missing:
+#
+#   1. the `gws` npm CLI                    -> ensure_gws_cli
+#   2. the IL `gws` Claude Code plugin      -> ensure_il_claude_plugins
+#      (supplies /gws:setup, the gws skill, and the destructive-op guard hook)
+#   3. GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND=file  -> ensure_gws_keyring_env
+#
+# Between 2026-07-30 and now, (2) was left to the claude.ai org's "Installed by
+# default" push and (3) was never installed at all. The org push did not reach
+# teammates' machines, so people ended up with the bare CLI, no /gws:setup, and
+# — for anyone who authed anyway — a keyring backend that silently eats their
+# credentials. All three are installed explicitly here now. Do not "simplify"
+# this back down to the npm install.
+
+ensure_gws_keyring_env() {
+    print_step "Installing the gws keyring guard..."
+
+    # CRITICAL, non-negotiable. gws's default keyring backend (macOS Keychain)
+    # silently DELETES ~/.config/gws/credentials.enc — a single invocation
+    # without this var set can wipe an already-working login, and the failure
+    # looks like "gws randomly stopped working" days later. The var must be set
+    # for EVERY gws invocation, not just interactive ones, so this writes to:
+    #
+    #   ~/.zshenv   — read by ALL zsh invocations, including non-interactive
+    #                 ones (cron, launchd, scripts). ~/.zshrc is NOT enough:
+    #                 it is interactive-only, and cron jobs calling gws are
+    #                 exactly the case that re-triggers the wipe.
+    #   ~/.bash_profile + ~/.bashrc — same coverage for bash users.
+    #   ~/.claude/settings.json "env" — covers Claude Code's own Bash calls
+    #                 regardless of which shell/profile the user ends up in.
+    local export_line='export GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND=file'
+    local profiles=("$HOME/.zshenv" "$HOME/.bash_profile" "$HOME/.bashrc")
+    local shell_profile wrote_any=false
+
+    for shell_profile in "${profiles[@]}"; do
+        # Create the file if absent — .zshenv in particular often doesn't exist
+        # yet, and it is the one that matters most.
+        [[ -f "$shell_profile" ]] || : > "$shell_profile"
+        if grep -qF 'GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND' "$shell_profile" 2>/dev/null; then
+            continue
+        fi
+        write_il_marker_block "$shell_profile" "gws" "$export_line" && wrote_any=true
+        IL_GWS_ENV_PROFILES+=("$shell_profile")
+    done
+
+    if [[ "$wrote_any" == true ]]; then
+        print_success "GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND=file added to your shell profiles"
+    else
+        print_info "Keyring guard already present in your shell profiles"
+    fi
+
+    # Belt and braces: also set it for Claude Code sessions directly, so the
+    # guard holds even if the user's login shell never sources those profiles.
+    local settings="$HOME/.claude/settings.json"
+    mkdir -p "$HOME/.claude"
+    [[ -f "$settings" ]] || echo '{}' > "$settings"
+    if command_exists jq; then
+        local tmp; tmp="$(mktemp)"
+        if jq '.env["GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND"] = "file"' "$settings" > "$tmp" 2>/dev/null; then
+            mv "$tmp" "$settings"
+            IL_SETTINGS_TOUCHED=true
+            print_success "Keyring guard set for Claude Code sessions too"
+        else
+            rm -f "$tmp"
+            print_warning "Couldn't set the keyring guard in settings.json (left untouched)"
+        fi
+    fi
+
+    # Make it true for the rest of THIS run as well — ensure_gws_cli and any
+    # later gws call in this process must not run on the keychain backend.
+    export GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND=file
+}
+
+ensure_il_claude_plugins() {
+    print_step "Registering the Irrational Labs Claude Code plugins..."
+
+    local claude_dir="$HOME/.claude"
+    local settings="$claude_dir/settings.json"
+
+    mkdir -p "$claude_dir"
+    [[ -f "$settings" ]] || echo '{}' > "$settings"
+
+    if ! command_exists jq; then
+        print_warning "jq not available — skipping plugin registration"
+        WARNINGS+=("IL plugins not registered (jq missing) — re-run this script once jq is installed")
+        return 0
+    fi
+
+    # Registered explicitly rather than left to the claude.ai org's
+    # "Installed by default" push. The org push is a nice-to-have that has not
+    # proven reliable on fresh machines; this line is what actually guarantees
+    # a teammate gets /gws:setup and the gws skill from the one setup command.
+    # Registering it twice is harmless — Claude Code dedupes by marketplace name.
+    #
+    # Marketplace registration is always (re)set. Per-plugin enabled flags use
+    # |= with a null-check so defaults are only set the FIRST time: if someone
+    # has explicitly disabled a plugin, re-running leaves that decision intact.
+    local tmp; tmp="$(mktemp)"
+    if jq '
+      .extraKnownMarketplaces["irrational-labs-plugins"] = {
+        "source": {
+          "source": "github",
+          "repo": "IrrationalLabs-team/knowledge-work-plugins"
+        }
+      }
+      | .enabledPlugins["gws@irrational-labs-plugins"]          |= (if . == null then true else . end)
+      | .enabledPlugins["il-slides@irrational-labs-plugins"]    |= (if . == null then true else . end)
+      | .enabledPlugins["key-behavior@irrational-labs-plugins"] |= (if . == null then true else . end)
+    ' "$settings" > "$tmp" 2>/dev/null; then
+        mv "$tmp" "$settings"
+        IL_SETTINGS_TOUCHED=true
+        print_success "IL plugin marketplace registered"
+        print_info "Default-on: gws, il-slides, key-behavior"
+        print_info "Available on demand: pipedrive, figma-port, my-chief-of-staff, il-qol"
+        print_info "  install with: /plugin install <name>@irrational-labs-plugins"
+    else
+        rm -f "$tmp"
+        print_warning "Couldn't write plugin registration to settings.json"
+        WARNINGS+=("IL plugins not registered — settings.json may be malformed")
+    fi
+}
+
 ensure_gws_cli() {
     print_step "Setting up the gws (Google Workspace) CLI..."
 
-    # IL Claude Code plugins (gws, il-slides, key-behavior, il-qol, ...) are
-    # distributed by the IL claude.ai org — "Installed by default" in the admin
-    # Plugins panel — so this script no longer registers the marketplace or
-    # enables plugins locally. They arrive on their own once the teammate signs
-    # in to Claude Code with their @irrationallabs.com account.
-    #
-    # What the org CANNOT push is the `gws` Google Workspace CLI itself — a
-    # separate npm package the gws plugin drives. Install it globally so
-    # /gws:setup works out of the box. (npm is guaranteed by
+    # The npm CLI the gws plugin drives. (npm is guaranteed by
     # ensure_early_tools, which runs earlier in main.)
     if command_exists gws; then
         print_success "gws CLI $(gws --version 2>/dev/null | head -1 | cut -d' ' -f2)"
@@ -552,8 +672,7 @@ ensure_gws_cli() {
         print_warning "npm not available — skipping gws CLI install"
         WARNINGS+=("gws CLI not installed (npm missing) — run: npm install -g @googleworkspace/cli")
     fi
-    print_info "IL plugins (gws, il-slides, ...) arrive automatically on first Claude launch — org-managed"
-    print_info "After that, run /gws:setup and sign in with your @irrationallabs.com account"
+    print_info "Next: restart Claude Code, then run /gws:setup and sign in with @irrationallabs.com"
 }
 
 load_manifest() {
@@ -752,9 +871,10 @@ write_receipt() {
     mkdir -p "$(dirname "$path")"
     [[ -f "$path" ]] || echo '{}' > "$path"
 
-    local formulae_json profiles_json repos_json
+    local formulae_json profiles_json repos_json gwsenv_json
     formulae_json="$(printf '%s\n' "${IL_FORMULAE_INSTALLED[@]:-}" | jq -R 'select(length>0)' | jq -s .)"
     profiles_json="$(printf '%s\n' "${IL_PATH_PROFILES[@]:-}"   | jq -R 'select(length>0)' | jq -s .)"
+    gwsenv_json="$(printf '%s\n' "${IL_GWS_ENV_PROFILES[@]:-}"  | jq -R 'select(length>0)' | jq -s .)"
     repos_json="$(printf '%s\n' "${IL_REPOS_CLONED[@]:-}" \
         | jq -R 'select(length>0) | split("|") | {path: .[0], created_dir: (.[1]=="true")}' | jq -s .)"
 
@@ -762,7 +882,9 @@ write_receipt() {
     jq \
         --argjson formulae "$formulae_json" \
         --argjson profiles "$profiles_json" \
+        --argjson gwsenv "$gwsenv_json" \
         --argjson repos "$repos_json" \
+        --arg settings "$IL_SETTINGS_TOUCHED" \
         --arg brew "$IL_BREW_INSTALLED" \
         --arg bun "$IL_BUN_INSTALLED" \
         --arg claude "$IL_CLAUDE_INSTALLED" \
@@ -774,6 +896,7 @@ write_receipt() {
         .schema_version = 1
         | .formulae_installed_by_us = (((.formulae_installed_by_us // []) + $formulae) | unique)
         | .path_edits = (((.path_edits // []) + $profiles) | unique)
+        | .gws_env_edits = (((.gws_env_edits // []) + $gwsenv) | unique)
         | .repos_cloned = (((.repos_cloned // []) + $repos) | unique_by(.path))
         | .brew_installed_by_us       = ((.brew_installed_by_us // false)       or ($brew == "true"))
         | .bun_installed_by_us        = ((.bun_installed_by_us // false)        or ($bun == "true"))
@@ -782,6 +905,31 @@ write_receipt() {
         | (if (has("git_identity_prior")) then . else .git_identity_prior = {name: $gname, email: $gemail} end)
         | (if (has("gh_was_authenticated_before")) then . else .gh_was_authenticated_before = ($ghbefore == "true") end)
         ' "$path" > "$tmp" && mv "$tmp" "$path"
+}
+
+# Append a marker-delimited block to a profile, once. The marker is keyed so a
+# profile can carry several independent il-setup blocks (PATH, gws env, ...)
+# without one suppressing the others. Key "" keeps the original unkeyed marker
+# so machines bootstrapped before this change still uninstall cleanly.
+#   write_il_marker_block <profile> <key> <line>
+write_il_marker_block() {
+    local profile="$1" key="$2" line="$3"
+    local open close
+    if [[ -n "$key" ]]; then
+        open="# >>> il-setup:$key >>>"; close="# <<< il-setup:$key <<<"
+    else
+        open="# >>> il-setup >>>";      close="# <<< il-setup <<<"
+    fi
+    if grep -qF "$open" "$profile" 2>/dev/null; then
+        return 1
+    fi
+    {
+        echo ""
+        echo "$open"
+        echo "$line"
+        echo "$close"
+    } >> "$profile"
+    return 0
 }
 
 # Append a marker-delimited PATH block to a profile, once, and record it so the
@@ -820,6 +968,8 @@ main() {
     ensure_github_auth          # step 4
     ensure_git_identity
     ensure_claude_code          # step 5: Claude available before anything that can fail
+    ensure_gws_keyring_env      # MUST precede any gws call — see the function comment
+    ensure_il_claude_plugins
     ensure_gws_cli
     load_manifest               # step 6
     select_repos

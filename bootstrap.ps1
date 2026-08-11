@@ -35,6 +35,8 @@ $script:ILBrew       = $false     # n/a on Windows; kept for schema parity
 $script:ILBun        = $false
 $script:ILClaude     = $false
 $script:ILGws        = $false
+$script:ILGwsEnv     = $false     # we set the keyring-backend user env var
+$script:ILSettings   = $false     # we wrote IL keys into ~/.claude/settings.json
 $script:ILPriorGitName  = ""
 $script:ILPriorGitEmail = ""
 $script:ILGhBefore      = $null
@@ -93,10 +95,12 @@ function Write-Receipt {
         bun_installed_by_us        = ((_bool $existing 'bun_installed_by_us') -or $script:ILBun)
         claude_code_installed_by_us= ((_bool $existing 'claude_code_installed_by_us') -or $script:ILClaude)
         gws_cli_installed_by_us    = ((_bool $existing 'gws_cli_installed_by_us') -or $script:ILGws)
+        gws_env_set_by_us          = ((_bool $existing 'gws_env_set_by_us') -or $script:ILGwsEnv)
     }
-    if ($existing.PSObject.Properties.Name -contains 'claude_settings') {
-        # Preserved for machines bootstrapped before plugin distribution moved
-        # to the claude.ai org backend — the uninstaller still cleans them up.
+    if ($script:ILSettings) {
+        $receipt.claude_settings = [ordered]@{ marketplace = "irrational-labs-plugins";
+            plugins = @("gws@irrational-labs-plugins","il-slides@irrational-labs-plugins","key-behavior@irrational-labs-plugins") }
+    } elseif ($existing.PSObject.Properties.Name -contains 'claude_settings') {
         $receipt.claude_settings = $existing.claude_settings
     }
     if ($existing.PSObject.Properties.Name -contains 'git_identity_prior') {
@@ -428,18 +432,110 @@ function Ensure-ClaudeCode {
     }
 }
 
+# -----------------------------------------------------------------------------
+# gws (Google Workspace) — the whole stack, installed rather than assumed
+# -----------------------------------------------------------------------------
+# Mirrors ensure_gws_keyring_env / ensure_il_claude_plugins / ensure_gws_cli in
+# bootstrap.sh. A working gws needs the npm CLI, the IL `gws` Claude Code plugin
+# (which supplies /gws:setup, the skill, and the guard hook), AND
+# GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND=file. Leaving the plugin to the claude.ai
+# org's "Installed by default" push did not reach fresh machines, so it is
+# registered explicitly here.
+
+function Ensure-GwsKeyringEnv {
+    Print-Step "Installing the gws keyring guard..."
+
+    # CRITICAL. gws's default keyring backend silently DELETES its stored
+    # credentials; without this variable a working login evaporates later with
+    # no error. Set it as a persistent USER env var so it applies to every
+    # process the user starts, not just this shell.
+    $existing = [Environment]::GetEnvironmentVariable("GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND", "User")
+    if ($existing -eq "file") {
+        Print-Info "Keyring guard already set for your user account"
+    } else {
+        [Environment]::SetEnvironmentVariable("GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND", "file", "User")
+        $script:ILGwsEnv = $true
+        Print-Success "GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND=file set for your user account"
+    }
+    # Apply to the current process too, so any gws call later in this run is
+    # already on the safe backend.
+    $env:GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND = "file"
+
+    # Belt and braces: also set it for Claude Code sessions directly.
+    $claudeDir = "$HOME\.claude"
+    if (-not (Test-Path $claudeDir)) { New-Item -ItemType Directory -Path $claudeDir -Force | Out-Null }
+    $settingsPath = "$claudeDir\settings.json"
+    if (Test-Path $settingsPath) {
+        try { $settings = Get-Content -Raw $settingsPath | ConvertFrom-Json } catch { $settings = [PSCustomObject]@{} }
+    } else { $settings = [PSCustomObject]@{} }
+    if (-not ($settings.PSObject.Properties.Name -contains "env")) {
+        $settings | Add-Member -NotePropertyName "env" -NotePropertyValue ([PSCustomObject]@{})
+    }
+    if ($settings.env.PSObject.Properties.Name -contains "GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND") {
+        $settings.env."GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND" = "file"
+    } else {
+        $settings.env | Add-Member -NotePropertyName "GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND" -NotePropertyValue "file"
+    }
+    # BOM-free UTF-8 — Set-Content -Encoding UTF8 emits a BOM on PS 5.1, which
+    # breaks JSON parsers reading settings.json.
+    $json = $settings | ConvertTo-Json -Depth 12
+    [System.IO.File]::WriteAllText($settingsPath, $json, (New-Object System.Text.UTF8Encoding($false)))
+    $script:ILSettings = $true
+    Print-Success "Keyring guard set for Claude Code sessions too"
+}
+
+function Ensure-IlClaudePlugins {
+    Print-Step "Registering the Irrational Labs Claude Code plugins..."
+
+    $claudeDir = "$HOME\.claude"
+    if (-not (Test-Path $claudeDir)) { New-Item -ItemType Directory -Path $claudeDir -Force | Out-Null }
+    $settingsPath = "$claudeDir\settings.json"
+
+    if (Test-Path $settingsPath) {
+        try { $settings = Get-Content -Raw $settingsPath | ConvertFrom-Json } catch { $settings = [PSCustomObject]@{} }
+    } else { $settings = [PSCustomObject]@{} }
+
+    function Ensure-Prop($obj, $name, $value) {
+        if (-not ($obj.PSObject.Properties.Name -contains $name)) {
+            $obj | Add-Member -NotePropertyName $name -NotePropertyValue $value
+        }
+    }
+
+    # Marketplace registration is always (re)set.
+    $marketplace = [PSCustomObject]@{
+        source = [PSCustomObject]@{
+            source = "github"
+            repo   = "IrrationalLabs-team/knowledge-work-plugins"
+        }
+    }
+    Ensure-Prop $settings "extraKnownMarketplaces" ([PSCustomObject]@{})
+    if ($settings.extraKnownMarketplaces.PSObject.Properties.Name -contains "irrational-labs-plugins") {
+        $settings.extraKnownMarketplaces."irrational-labs-plugins" = $marketplace
+    } else {
+        $settings.extraKnownMarketplaces | Add-Member -NotePropertyName "irrational-labs-plugins" -NotePropertyValue $marketplace
+    }
+
+    # Default-on plugins — only set when the key is absent, so an explicit
+    # disable survives a re-run.
+    Ensure-Prop $settings "enabledPlugins" ([PSCustomObject]@{})
+    foreach ($p in @("gws@irrational-labs-plugins","il-slides@irrational-labs-plugins","key-behavior@irrational-labs-plugins")) {
+        if (-not ($settings.enabledPlugins.PSObject.Properties.Name -contains $p)) {
+            $settings.enabledPlugins | Add-Member -NotePropertyName $p -NotePropertyValue $true
+        }
+    }
+
+    $json = $settings | ConvertTo-Json -Depth 12
+    [System.IO.File]::WriteAllText($settingsPath, $json, (New-Object System.Text.UTF8Encoding($false)))
+    $script:ILSettings = $true
+    Print-Success "IL plugin marketplace registered"
+    Print-Info "Default-on: gws, il-slides, key-behavior"
+    Print-Info "Available on demand: pipedrive, figma-port, my-chief-of-staff, il-qol"
+}
+
 function Ensure-GwsCli {
     Print-Step "Setting up the gws (Google Workspace) CLI..."
 
-    # IL Claude Code plugins (gws, il-slides, key-behavior, il-qol, ...) are
-    # distributed by the IL claude.ai org — "Installed by default" in the admin
-    # Plugins panel — so this script no longer registers the marketplace or
-    # enables plugins locally. They arrive on their own once the teammate signs
-    # in to Claude Code with their @irrationallabs.com account.
-    #
-    # What the org CANNOT push is the `gws` Google Workspace CLI itself — a
-    # separate npm package the gws plugin drives. Install it globally so
-    # /gws:setup works out of the box.
+    # The npm CLI the gws plugin drives.
     if (Test-CommandExists "gws") {
         Print-Success "gws CLI already installed"
     } elseif (Test-CommandExists "npm") {
@@ -451,8 +547,7 @@ function Ensure-GwsCli {
     } else {
         Print-Warning "npm not available - skipping gws CLI install"
     }
-    Print-Info "IL plugins (gws, il-slides, ...) arrive automatically on first Claude launch - org-managed"
-    Print-Info "After that, run /gws:setup and sign in with your @irrationallabs.com account"
+    Print-Info "Next: restart Claude Code, then run /gws:setup and sign in with @irrationallabs.com"
 }
 
 function Load-Manifest {
@@ -680,7 +775,9 @@ function Main {
     Ensure-GitHubAuth          # step 4
     Ensure-GitIdentity
     Ensure-ClaudeCode          # step 5 (moved up; hardened in Task 8)
-    Ensure-GwsCli              # step 5 (plugins now org-managed; CLI still local)
+    Ensure-GwsKeyringEnv       # MUST precede any gws call — see the function comment
+    Ensure-IlClaudePlugins
+    Ensure-GwsCli              # step 5
     Load-Manifest              # step 6
     Select-Repos
     Install-ShellHelpers       # step 7

@@ -27,9 +27,33 @@ irm https://raw.githubusercontent.com/ChaningJang/setup/main/bootstrap.ps1 | iex
 
 1. Installs base tools: Git, Git LFS, GitHub CLI, jq, Node (npm), Bun, Claude Code, and shell helpers (ripgrep, fd, bat, fzf, delta).
 2. Signs you in to GitHub and sets your commit identity.
-3. Installs the [`gws` Google Workspace CLI](https://www.npmjs.com/package/@googleworkspace/cli) (run `/gws:setup` in Claude Code afterward to sign in). IL Claude Code plugins are no longer registered here — the IL claude.ai org pushes them automatically once you sign in to Claude Code.
+3. Sets up **Google Workspace (`gws`)** end to end — see [below](#google-workspace-gws).
 4. **Asks which repositories to clone** — the menu only shows repos your GitHub account can access.
 5. For **Irrational Labs HQ**, runs its full setup (media tools, Git LFS, dependencies, secrets). Other repos get a generic best-effort setup (dependencies, LFS, `.env` scaffold).
+
+## Google Workspace (`gws`)
+
+A working `gws` needs three separate things, and you're broken if any one is missing. The script installs all three:
+
+| Piece | What it is | Why it's needed |
+|---|---|---|
+| `gws` CLI | the [npm package](https://www.npmjs.com/package/@googleworkspace/cli), installed globally | the actual binary |
+| `gws` Claude Code plugin | registers the `IrrationalLabs-team/knowledge-work-plugins` marketplace and enables `gws`, `il-slides`, `key-behavior` | supplies `/gws:setup`, the `gws` skill, and the destructive-operation guard hook |
+| `GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND=file` | written to `~/.zshenv`, `~/.bash_profile`, `~/.bashrc`, and `~/.claude/settings.json` (`env`) | **critical** — see below |
+
+After the script finishes: **restart Claude Code**, then run `/gws:setup` and sign in with your @irrationallabs.com account.
+
+### ⚠️ The keyring variable is not optional
+
+`gws`'s default keyring backend (macOS Keychain) **silently deletes** `~/.config/gws/credentials.enc`. A single `gws` invocation without `GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND=file` can wipe an already-working login, and it fails with no error — you just find out days later that `gws` "randomly stopped working."
+
+It must be set for **every** `gws` invocation, not just interactive ones. That's why it goes in `~/.zshenv` rather than `~/.zshrc`: `.zshrc` is interactive-only, and cron jobs or scripts calling `gws` are exactly the case that re-triggers the wipe. Any new cron job, launchd agent, or script that shells out to `gws` must set it explicitly too.
+
+Don't remove these blocks, and don't "simplify" the setup back down to just the npm install.
+
+### Why the plugin is registered here rather than pushed by the org
+
+The IL claude.ai org can mark plugins "Installed by default" in the admin Plugins panel, and between 2026-07-30 and 2026-08-11 this script relied on that alone. It did not reach fresh machines — teammates ended up with the bare CLI, no `/gws:setup`, and no keyring guard. The registration is explicit again. If the org push also works, no harm done: Claude Code dedupes by marketplace name.
 
 ## Uninstall / offboarding
 

@@ -64,6 +64,8 @@ strip_il_settings() {
         | del(.enabledPlugins["gws@irrational-labs-plugins"])
         | del(.enabledPlugins["il-slides@irrational-labs-plugins"])
         | del(.enabledPlugins["key-behavior@irrational-labs-plugins"])
+        | del(.env["GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND"])
+        | (if (.env? // {}) == {} then del(.env) else . end)
     ' "$file" > "$tmp" 2>/dev/null; then
         mv "$tmp" "$file"
         print_success "Removed IL marketplace + plugin keys from $(basename "$file")"
@@ -73,19 +75,30 @@ strip_il_settings() {
     fi
 }
 
-# Delete the il-setup marker block (inclusive) from a profile.
-remove_il_path_block() {
-    local file="$1"
+# Delete an il-setup marker block (inclusive) from a profile. Key "" is the
+# original unkeyed PATH marker; "gws" is the keyring-guard block.
+remove_il_marker_block() {
+    local file="$1" key="${2:-}" label="${3:-block}"
     [[ -f "$file" ]] || return 0
-    grep -qF '# >>> il-setup >>>' "$file" 2>/dev/null || { print_info "No il-setup PATH block in $(basename "$file")"; return 0; }
+    local open close
+    if [[ -n "$key" ]]; then
+        open="# >>> il-setup:$key >>>"; close="# <<< il-setup:$key <<<"
+    else
+        open="# >>> il-setup >>>";      close="# <<< il-setup <<<"
+    fi
+    grep -qF "$open" "$file" 2>/dev/null || { print_info "No il-setup $label in $(basename "$file")"; return 0; }
     local tmp; tmp="$(mktemp)"
-    awk '
-        /# >>> il-setup >>>/ { skip=1 }
-        skip != 1 { print }
-        /# <<< il-setup <<</ { skip=0 }
+    # NB: awk vars are named m_open/m_close, not open/close — `close` is an awk
+    # builtin and `-v close=...` is a hard error ("can't assign to close").
+    awk -v m_open="$open" -v m_close="$close" '
+        index($0, m_open)  { skip=1 }
+        skip != 1          { print }
+        index($0, m_close) { skip=0 }
     ' "$file" > "$tmp" && mv "$tmp" "$file"
-    print_success "Removed il-setup PATH block from $(basename "$file")"
+    print_success "Removed il-setup $label from $(basename "$file")"
 }
+
+remove_il_path_block() { remove_il_marker_block "$1" "" "PATH block"; }
 
 # Restore prior git identity from the receipt, or unset if none existed.
 restore_git_identity() {
@@ -124,8 +137,12 @@ remove_gws() {
     # Clear OAuth credentials FIRST, while gws is still installed. `gws auth
     # logout` is the supported command — it "clears saved credentials and token
     # cache" (verified via `gws auth --help`).
+    #
+    # The keyring guard has to stay set for this call too: logging out on the
+    # default keychain backend is the same code path that silently eats
+    # credentials, and we want a clean logout, not a wipe.
     if command_exists gws; then
-        run_cmd gws auth logout || true
+        GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND=file run_cmd gws auth logout || true
         print_success "Cleared gws credentials (gws auth logout)"
     fi
     if [[ "$RECEIPT_FOUND" == true && "$(jq -r '.gws_cli_installed_by_us // false' "$RECEIPT_PATH")" != "true" ]]; then
@@ -143,6 +160,26 @@ remove_gws() {
         run_cmd rm -rf "$cfg"
         print_success "Removed leftover gws config at $cfg"
     fi
+    remove_gws_env_edits
+}
+
+# Strip the GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND block from every profile the
+# installer wrote it to (receipt), or the usual suspects if there's no receipt.
+remove_gws_env_edits() {
+    if [[ "$RECEIPT_FOUND" == true ]]; then
+        local n; n="$(jq -r '(.gws_env_edits // []) | length' "$RECEIPT_PATH")"
+        if [[ "$n" -gt 0 ]]; then
+            local i p
+            for (( i=0; i<n; i++ )); do
+                p="$(jq -r ".gws_env_edits[$i]" "$RECEIPT_PATH")"
+                [[ -n "$p" && "$p" != "null" ]] && remove_il_marker_block "$p" "gws" "gws keyring block"
+            done
+            return 0
+        fi
+    fi
+    remove_il_marker_block "$HOME/.zshenv"       "gws" "gws keyring block"
+    remove_il_marker_block "$HOME/.bash_profile" "gws" "gws keyring block"
+    remove_il_marker_block "$HOME/.bashrc"       "gws" "gws keyring block"
 }
 
 remove_github_auth() {
