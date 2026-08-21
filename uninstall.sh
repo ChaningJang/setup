@@ -142,7 +142,7 @@ remove_gws() {
     # default keychain backend is the same code path that silently eats
     # credentials, and we want a clean logout, not a wipe.
     if command_exists gws; then
-        GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND=file run_cmd gws auth logout || true
+        GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND="file" run_cmd gws auth logout || true
         print_success "Cleared gws credentials (gws auth logout)"
     fi
     if [[ "$RECEIPT_FOUND" == true && "$(jq -r '.gws_cli_installed_by_us // false' "$RECEIPT_PATH")" != "true" ]]; then
