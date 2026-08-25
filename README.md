@@ -65,7 +65,13 @@ loud warning for any IL repo with uncommitted or unpushed work.
 
 It installs nothing, removes nothing, and writes no file. Download it and read
 it before running — for an offboarding this is deliberately *not* a
-`curl | bash` one-liner:
+`curl | bash` (or `irm | iex`) one-liner. Onboarding and offboarding have
+opposite trust dynamics: on the way in you are asking to be set up, on the way
+out someone is asking to inspect your machine. Piping to a shell also leaves a
+TOCTOU gap — you would be reading one script and running whatever the URL
+serves a second later. Downloading first closes both.
+
+**macOS / Linux — `audit.sh`:**
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/ChaningJang/setup/main/audit.sh -o il-audit.sh
@@ -73,9 +79,87 @@ less il-audit.sh          # read it — it is meant to be read
 bash il-audit.sh          # prints the report; redirect it yourself if you like
 ```
 
+**Windows — `audit.ps1`:**
+
+```powershell
+Invoke-WebRequest https://raw.githubusercontent.com/ChaningJang/setup/main/audit.ps1 -OutFile il-audit.ps1
+notepad il-audit.ps1      # read it — it is meant to be read
+powershell -ExecutionPolicy Bypass -File .\il-audit.ps1
+```
+
+`audit.ps1` is a port of `audit.sh`, not a translation of its paths: every
+location it checks is traced to a line in `bootstrap.ps1` (winget and scoop
+package ids, `%LOCALAPPDATA%\il-setup\receipt.json`, the PowerShell profile
+instead of `.zshrc`, the persistent **User** environment block instead of
+`.zshenv`, `~\.bun\bin` on the User PATH). Anything that cannot be traced to a
+line is reported UNKNOWN rather than guessed. It refuses to run anywhere but
+Windows — an empty report reads too much like a clean machine.
+
 The output is safe to paste back: credential *values*, `.env` contents, SSH
-keys and repo contents are never printed, and email addresses are masked. A
-human then decides the removal list from that report.
+keys and repo contents are never printed, email addresses are masked, and on
+the PowerShell side every output line additionally passes through a scrubber
+for `gho_`/`ghp_`/`github_pat_`, `sk-`, `xox`, `AIza`, PEM private-key headers
+and bearer tokens. A human then decides the removal list from that report.
+
+#### Verifying the audit scripts before you trust them
+
+`audit.sh` was verified empirically on a real machine: key-file mtimes
+unchanged across two runs, home-directory entry count unchanged, `.git/index`
+mtime unchanged, and an output scan for every secret pattern.
+
+`audit.ps1` has **not** had that treatment — it was written without access to a
+Windows machine. It is statically verified instead, by
+`tests/audit_readonly_check.py`, which runs in CI: it strips comments and
+string literals (keeping `$( ... )` subexpressions, which are real code) and
+then asserts that no write-capable operation survives — `Set-Content`,
+`Add-Content`, `Out-File`, `New-Item`, `Remove-Item`, `Move-Item`, `Copy-Item`,
+`Rename-Item`, `Set-Item`, `Set-ItemProperty`, `New-ItemProperty`,
+`Remove-ItemProperty`, `Clear-Content`, `Export-*`, `Tee-Object`,
+`StreamWriter`/`FileStream`, `.Save()`, `[IO.File]::Write*`, `New-PSDrive`,
+`Set-Location`, `Set-ExecutionPolicy`, `Start-Process`, `Invoke-Expression`,
+any network fetch, any winget/scoop/npm/bun mutation, any `git` mutation, and
+the `>` / `>>` file-creating redirections. It also asserts that the only two
+`$env:` assignments are the process-local `GIT_OPTIONAL_LOCKS` and
+`GIT_TERMINAL_PROMPT`, and that every output line goes through the scrubber.
+
+**Run this on the first Windows box that is available, before sending
+`audit.ps1` to anyone.** These are the same four checks `audit.sh` passed.
+
+```powershell
+# 0. Syntax + linter, which cannot run on macOS
+$tokens = $null; $errs = $null
+[void][System.Management.Automation.Language.Parser]::ParseFile(
+        "$PWD\audit.ps1", [ref]$tokens, [ref]$errs)
+$errs                                         # MUST be empty
+Invoke-ScriptAnalyzer -Path .\audit.ps1      # MUST report no Error-severity rule
+
+# 1. Key-file mtimes unchanged across two runs
+$watch = @("$HOME\.gitconfig", "$HOME\.claude\settings.json",
+           "$env:LOCALAPPDATA\il-setup\receipt.json",
+           "$HOME\irrational_labs_hq\.git\index")
+$before = $watch | Where-Object { Test-Path $_ } |
+          ForEach-Object { [PSCustomObject]@{ P=$_; T=(Get-Item $_).LastWriteTime } }
+.\audit.ps1 | Out-Null; .\audit.ps1 | Out-Null
+$after  = $before | ForEach-Object { [PSCustomObject]@{ P=$_.P; T=(Get-Item $_.P).LastWriteTime } }
+Compare-Object $before $after -Property P,T   # MUST be empty
+
+# 2. Home-directory entry count unchanged (no stray file or dir created)
+$n1 = (Get-ChildItem $HOME -Force -Recurse -Depth 1 -EA SilentlyContinue).Count
+.\audit.ps1 | Out-Null
+$n2 = (Get-ChildItem $HOME -Force -Recurse -Depth 1 -EA SilentlyContinue).Count
+"$n1 -> $n2"                                  # MUST be identical
+
+# 3. .git\index mtime unchanged (proves GIT_OPTIONAL_LOCKS=0 took effect)
+#    covered by check 1; repeat per IL repo present on the machine.
+
+# 4. Output scan for every secret pattern
+.\audit.ps1 | Select-String -Pattern 'gh[pousr]_[A-Za-z0-9]{6,}','github_pat_',
+    'sk-[A-Za-z0-9]{12,}','xox[abprse]-','AIza[A-Za-z0-9_-]{10,}',
+    'PRIVATE KEY-----','(?i)bearer [A-Za-z0-9._-]{8,}'   # MUST be empty
+```
+
+Until those four pass on real hardware, treat `audit.ps1` as reviewed but not
+proven.
 
 ### Step 2 — the uninstaller
 
