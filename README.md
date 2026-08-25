@@ -57,6 +57,29 @@ The IL claude.ai org can mark plugins "Installed by default" in the admin Plugin
 
 ## Uninstall / offboarding
 
+### Step 1 — audit first (read-only)
+
+**Before anyone runs the uninstaller, run the audit.** It inspects the machine
+and prints a three-way split — CANDIDATE FOR REMOVAL / KEEP / UNKNOWN — plus a
+loud warning for any IL repo with uncommitted or unpushed work.
+
+It installs nothing, removes nothing, and writes no file. Download it and read
+it before running — for an offboarding this is deliberately *not* a
+`curl | bash` one-liner:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ChaningJang/setup/main/audit.sh -o il-audit.sh
+less il-audit.sh          # read it — it is meant to be read
+bash il-audit.sh          # prints the report; redirect it yourself if you like
+```
+
+The output is safe to paste back: credential *values*, `.env` contents, SSH
+keys and repo contents are never printed, and email addresses are masked. A
+human then decides the removal list from that report.
+
+### Step 2 — the uninstaller
+
+
 To reverse what setup added (e.g. when a consultant leaves), run:
 
     curl -fsSL https://raw.githubusercontent.com/ChaningJang/setup/main/uninstall.sh | bash
@@ -78,6 +101,26 @@ It only removes tools the script itself installed (never ones that predated it),
 restores your previous git identity, and edits only the IL keys in
 `settings.json` — it never deletes `~/.claude`. Removing Homebrew entirely is
 available only via the custom picker, with a warning.
+
+#### ⚠️ Known gaps in the uninstaller (audited 2026-08-24 — fix before next use)
+
+- **`IL_DRY_RUN=1` is not a dry run.** It is a test hook. `run_cmd` covers the
+  shell-outs, but `strip_il_settings` and `remove_il_marker_block` `mv` their
+  temp file over the real target regardless — so a "dry run" still edits
+  `~/.claude/settings.json` and your shell profiles for real. Never hand it to
+  a user as a preview. Use `audit.sh` above instead.
+- **Preset 2 deletes the Claude Code binary without checking the receipt.**
+  `remove_claude_code` only tests `command -v claude`; it ignores
+  `.claude_code_installed_by_us`. It will remove a Claude Code that predated IL.
+- **No receipt ⇒ the destructive paths still run.** With no receipt (or no
+  `jq`), `remove_gws` still npm-uninstalls the `gws` CLI and `rm -rf`s
+  `~/.config/gws`, and `remove_github_auth` still runs `gh auth logout` — on
+  tools and logins that may have predated IL.
+- **`remove_repos` does no safety check before `rm -rf`.** It does not look for
+  uncommitted or unpushed commits, and does not verify the path is still the
+  repo the receipt recorded.
+- **The unmarked `brew shellenv` line** the installer may append to `.zshrc` has
+  no `il-setup` marker, so it is never cleaned up.
 
 ## Just the tools, or a specific repo
 

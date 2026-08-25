@@ -8,7 +8,7 @@ jobs:
       - name: Validate repos.json
         run: jq empty repos.json && jq -e '.repos | length > 0' repos.json
       - name: ShellCheck
-        run: sudo apt-get update && sudo apt-get install -y shellcheck && shellcheck -S warning bootstrap.sh uninstall.sh tests/lib/assert.sh tests/test_receipt.sh tests/test_uninstall.sh
+        run: sudo apt-get update && sudo apt-get install -y shellcheck && shellcheck -S warning bootstrap.sh uninstall.sh audit.sh tests/lib/assert.sh tests/test_receipt.sh tests/test_uninstall.sh
       - name: Unit tests
         run: bash tests/test_receipt.sh && bash tests/test_uninstall.sh
       - name: PSScriptAnalyzer
