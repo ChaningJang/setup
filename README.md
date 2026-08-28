@@ -63,29 +63,32 @@ The IL claude.ai org can mark plugins "Installed by default" in the admin Plugin
 and prints a three-way split — CANDIDATE FOR REMOVAL / KEEP / UNKNOWN — plus a
 loud warning for any IL repo with uncommitted or unpushed work.
 
-It installs nothing, removes nothing, and writes no file. Download it and read
-it before running — for an offboarding this is deliberately *not* a
-`curl | bash` (or `irm | iex`) one-liner. Onboarding and offboarding have
-opposite trust dynamics: on the way in you are asking to be set up, on the way
-out someone is asking to inspect your machine. Piping to a shell also leaves a
-TOCTOU gap — you would be reading one script and running whatever the URL
-serves a second later. Downloading first closes both.
+It installs nothing, removes nothing, and writes no file. It only prints a
+report. Paste one line, the same way you ran setup:
+
+**Windows — `audit.ps1`** (saves the report to your Desktop and opens it):
+
+```powershell
+irm https://raw.githubusercontent.com/ChaningJang/setup/main/audit.ps1 | iex > "$HOME\Desktop\il-audit.txt"; notepad "$HOME\Desktop\il-audit.txt"
+```
 
 **macOS / Linux — `audit.sh`:**
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ChaningJang/setup/main/audit.sh -o il-audit.sh
-less il-audit.sh          # read it — it is meant to be read
-bash il-audit.sh          # prints the report; redirect it yourself if you like
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/ChaningJang/setup/main/audit.sh)" > ~/Desktop/il-audit.txt; open ~/Desktop/il-audit.txt
 ```
 
-**Windows — `audit.ps1`:**
+The one file that appears (`il-audit.txt`) is written by *your* shell's `>`
+redirect, not by the script; drop the redirect and the report just prints.
+Send that file back. It is safe to paste: credential *values*, `.env`
+contents, SSH keys and repo contents are never printed, email addresses are
+masked, and every output line passes through a scrubber for `gho_`/`ghp_`/
+`github_pat_`, `sk-`, `xox`, `AIza`, PEM private-key headers and bearer
+tokens. A human then decides the removal list from that report.
 
-```powershell
-Invoke-WebRequest https://raw.githubusercontent.com/ChaningJang/setup/main/audit.ps1 -OutFile il-audit.ps1
-notepad il-audit.ps1      # read it — it is meant to be read
-powershell -ExecutionPolicy Bypass -File .\il-audit.ps1
-```
+If you would rather read the script before running it, open the URL in a
+browser first — it is written to be read, and everything above is explained
+again at the top of the file.
 
 `audit.ps1` is a port of `audit.sh`, not a translation of its paths: every
 location it checks is traced to a line in `bootstrap.ps1` (winget and scoop
