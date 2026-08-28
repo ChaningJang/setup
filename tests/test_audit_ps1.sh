@@ -72,6 +72,9 @@ cat > "$F/LOCALAPPDATA/il-setup/receipt.json" <<EOF
  "repos_cloned":[{"path":"$H/irrational_labs_hq"},{"path":"$H/gone_repo"}]}
 EOF
 mkdir -p "$F/APPDATA/npm/node_modules/@googleworkspace/cli" "$F/APPDATA/npm/node_modules/.bin" "$F/APPDATA/npm/node_modules/corepack"
+# gh login on disk, with a planted token: must be reported as present, never printed.
+mkdir -p "$F/APPDATA/GitHub CLI"
+printf 'github.com:\n    user: test-consultant\n    oauth_token: gho_PLANTEDGHTOKEN0123456789\n    git_protocol: https\n' > "$F/APPDATA/GitHub CLI/hosts.yml"
 mkrepo() {
     git init -q "$1"
     git -C "$1" -c user.name=t -c user.email=t@t.t commit -q --allow-empty -m init
@@ -121,6 +124,9 @@ fi
 # Regression guard: an earlier version shelled out to `npm ls -g`, and npm
 # wrote _logs/*.log and _update-notifier-last-checked into the home dir.
 [ ! -e "$H/.npm" ] && ok "no .npm cache created (script does not shell out to npm)" || bad ".npm appeared in the fixture home: a subprocess wrote files"
+# Regression guard: `gh auth status` writes ~/.local/state/gh/device-id on
+# first use (caught by CI on ubuntu, where gh is newer than on the dev Mac).
+[ ! -e "$H/.local/state/gh" ] && ok "no gh state dir created (script does not shell out to gh)" || bad ".local/state/gh appeared: gh was run"
 # 3. .git/index
 [ "$(cat "$T/idx0")" = "$(cat "$T/idx1")" ] && ok ".git/index mtime unchanged (GIT_OPTIONAL_LOCKS=0 held)" || bad ".git/index was rewritten"
 # Determinism: only the Generated: line may differ between runs.
@@ -152,6 +158,9 @@ expect "core.longpaths reported"                  "git core.longpaths=true is se
 expect "npm globals read off disk (scoped)"      "@googleworkspace/cli"
 expect "npm globals read off disk (unscoped)"    "   corepack"
 if grep -q '^   \.bin$' "$T/out1"; then bad ".bin listed as an npm package"; else ok "npm .bin dir skipped"; fi
+expect "gh login read from hosts.yml"            "gh: github.com entry present"
+expect "gh user handle reported"                 "(user test-consultant)"
+expect "gh login -> REMOVE (receipt says IL logged in)" "[REMOVE ] GitHub login was established by IL setup"
 expect "SSH keys -> KEEP"                         "[KEEP   ] SSH keys: 1 public key(s)"
 expect "personal repo counted as KEEP"            "[KEEP   ] 1 non-IL git repo(s)"
 expect "work at risk flagged"                     "*** WORK AT RISK: $H/irrational_labs_hq"

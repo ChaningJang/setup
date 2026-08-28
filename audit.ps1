@@ -699,16 +699,28 @@ try {
 Write-Item "HKLM LongPathsEnabled (read only, never written here): $(if ($null -ne $lpReg) { $lpReg } else { '(unset)' })"
 Write-Item '          >> Machine-wide OS setting. Leave it. It affects every app, not IL.'
 
-Write-Sub 'GitHub CLI login'
+# Read off disk, NOT via `gh auth status`: running gh at all writes
+# ~\.local\state\gh\device-id on first use (caught by CI). gh keeps its login
+# in hosts.yml under $env:GH_CONFIG_DIR or %APPDATA%\GitHub CLI. Only the
+# github.com user handle is printed; the token line is never read out (and the
+# scrubber would blank it anyway).
+Write-Sub 'GitHub CLI login (read from hosts.yml, gh is not run)'
+$ghConfigDir = $env:GH_CONFIG_DIR
+if ([string]::IsNullOrWhiteSpace($ghConfigDir)) { $ghConfigDir = Join-Path $env:APPDATA 'GitHub CLI' }
+$ghHosts = Join-Path $ghConfigDir 'hosts.yml'
 if (Test-CommandPresent 'gh') {
-    $ghOut = @()
-    try { $ghOut = @(& gh auth status 2>&1) } catch { $ghOut = @() }
-    $ghOk = ($LASTEXITCODE -eq 0)
-    if ($ghOk) {
-        foreach ($l in $ghOut) {
-            $s = ($l | Out-String).Trim()
-            if ($s -match '(?i)logged in|account|scopes') { Write-Item "gh: $s" }
+    $ghUser = ''
+    $ghLoggedIn = $false
+    if (Test-Path -LiteralPath $ghHosts -PathType Leaf) {
+        $inGithub = $false
+        foreach ($l in @(Get-Content -LiteralPath $ghHosts -ErrorAction SilentlyContinue)) {
+            if ($l -match '^github\.com:') { $inGithub = $true; $ghLoggedIn = $true; continue }
+            if ($l -match '^\S') { $inGithub = $false; continue }
+            if ($inGithub -and $l -match '^\s+user:\s*(\S+)') { $ghUser = $Matches[1] }
         }
+    }
+    if ($ghLoggedIn) {
+        Write-Item "gh: github.com entry present in $ghHosts$(if ($ghUser) { " (user $ghUser)" })"
         $ghBefore = Get-ReceiptField 'gh_was_authenticated_before' $null
         if ($ghBefore -eq $true) {
             Write-Tag 'KEEP' 'You were already signed into GitHub before IL setup - this login is YOURS'
@@ -720,7 +732,7 @@ if (Test-CommandPresent 'gh') {
         Write-Item '          >> Either way, the durable offboarding step is removing you from'
         Write-Item '          >> the IrrationalLabs-team GitHub org, which is done server-side.'
     } else {
-        Write-Item 'gh installed but not logged in.'
+        Write-Item "gh installed but no github.com login in $ghHosts."
     }
 } else {
     Write-Item 'gh not installed.'

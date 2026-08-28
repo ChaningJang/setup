@@ -268,10 +268,16 @@ for p in "$HOME/.zshrc" "$HOME/.bash_profile"; do
   fi
 done
 
-sub "GitHub CLI login"
+# Read off disk, NOT via `gh auth status`: running gh at all writes
+# ~/.local/state/gh/device-id on first use (caught by CI). gh keeps its login in
+# hosts.yml under $GH_CONFIG_DIR or ~/.config/gh. Only the github.com user
+# handle is printed; the token line is never read out.
+sub "GitHub CLI login (read from hosts.yml, gh is not run)"
+gh_hosts="${GH_CONFIG_DIR:-$HOME/.config/gh}/hosts.yml"
 if command -v gh >/dev/null 2>&1; then
-  if gh auth status >/dev/null 2>&1; then
-    gh auth status 2>&1 | grep -iE 'logged in|account|scopes' | sed 's/^/   gh: /' | sed 's/gho_[A-Za-z0-9]*/gho_***REDACTED***/g'
+  if [ -f "$gh_hosts" ] && grep -q '^github\.com:' "$gh_hosts" 2>/dev/null; then
+    gh_user=$(awk '/^github\.com:/{f=1;next} /^[^ ]/{f=0} f && $1=="user:"{print $2; exit}' "$gh_hosts" 2>/dev/null)
+    item "gh: github.com entry present in $gh_hosts${gh_user:+ (user $gh_user)}"
     if [ "$(rjq '.gh_was_authenticated_before // false')" = "true" ]; then
       tag KEEP "You were already signed into GitHub before IL setup — this login is YOURS"
     elif [ "$HAVE_RECEIPT" = yes ]; then
@@ -282,7 +288,7 @@ if command -v gh >/dev/null 2>&1; then
     item "          >> Either way, the durable offboarding step is removing you from"
     item "          >> the IrrationalLabs-team GitHub org, which is done server-side."
   else
-    item "gh installed but not logged in."
+    item "gh installed but no github.com login in $gh_hosts."
   fi
 else
   item "gh not installed."

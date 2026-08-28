@@ -34,7 +34,9 @@
      (also in `Get-CandidateRepo`).
   2. `npm ls -g` wrote `_logs/*.log` + `_update-notifier-last-checked` into the
      home dir. Same hole in `audit.sh`. Both now read global `node_modules` off disk.
-  After the fixes: 34/34 empirical checks pass, static checker PASS, PSScriptAnalyzer
+  3. `gh auth status` wrote `~/.local/state/gh/device-id` (CI-only: ubuntu's gh is
+     newer than the Mac's). Both scripts now read gh's `hosts.yml` off disk instead.
+  After the fixes: 38/38 empirical checks pass, static checker PASS, PSScriptAnalyzer
   1 Information note only, parser 0 errors. `audit.sh` re-proven on Chaning's Mac
   with a full `~/.npm` mtime snapshot: unchanged, 19/5/13 totals unchanged.
   Evidence: `PWSH=<pwsh> bash tests/test_audit_ps1.sh` -> "RESULT: PASS".

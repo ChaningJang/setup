@@ -128,12 +128,14 @@ one line changed. This exercises everything except the Windows-only probes
 (winget, HKLM, scheduled tasks, the User environment block), which degrade to
 UNKNOWN as designed.
 
-Running it found two bugs the static check could not see: PowerShell unrolls a
-one-element array on `return`, so every git origin URL came back as its first
+Running it found three bugs the static check could not see: PowerShell unrolls
+a one-element array on `return`, so every git origin URL came back as its first
 character and every repo read as non-IL — section 5 would have said "nothing to
-lose" on a machine full of unpushed work; and `npm ls -g` wrote log files into
-the home directory (the same hole existed in `audit.sh`; both now read the
-global `node_modules` off disk).
+lose" on a machine full of unpushed work; `npm ls -g` wrote log files into the
+home directory; and `gh auth status` wrote `~/.local/state/gh/device-id` (that
+one only showed up in CI, where `gh` is newer). The last two are the same
+lesson: the script never writes, but a tool it shells out to can. Both scripts
+now read `node_modules` and gh's `hosts.yml` off disk and run neither tool.
 
 **Statically**, by `tests/audit_readonly_check.py`: it strips comments and
 string literals (keeping `$( ... )` subexpressions, which are real code) and
