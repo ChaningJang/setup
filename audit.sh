@@ -319,11 +319,35 @@ else
   item "No IL/gws crontab entries. (${ct:-0} crontab lines total; not printed.)"
 fi
 
-sub "Globally installed npm packages (names only)"
-if command -v npm >/dev/null 2>&1; then
-  npm ls -g --depth=0 2>/dev/null | tail -n +2 | sed 's/^/   /' | head -30
-else
-  item "npm not installed."
+# Read off disk, NOT via `npm ls -g`: running npm at all writes files under
+# ~/.npm (_logs/*.log and _update-notifier-last-checked) - proven empirically.
+# bootstrap.sh installs node via Homebrew (line 177) and gws via `npm install -g`
+# (line 663) with the default prefix, so the global root is <brew prefix>/lib/
+# node_modules. A custom NPM_CONFIG_PREFIX or ~/.npm-global is checked too.
+sub "Globally installed npm packages (names only, read from disk)"
+npm_roots=""
+[ -n "${NPM_CONFIG_PREFIX:-}" ] && npm_roots="$NPM_CONFIG_PREFIX/lib/node_modules"
+npm_roots="$npm_roots /opt/homebrew/lib/node_modules /usr/local/lib/node_modules $HOME/.npm-global/lib/node_modules"
+npm_found=0
+for root in $npm_roots; do
+  [ -d "$root" ] || continue
+  npm_found=1
+  item "$root:"
+  # Scoped packages (@scope/name) live one level down; .bin is not a package.
+  for d in "$root"/*/ "$root"/@*/*/; do
+    [ -d "$d" ] || continue
+    name="${d#"$root"/}"; name="${name%/}"
+    case "$name" in .bin|@*/) continue ;; esac
+    case "$name" in @*) [ "${name#*/}" = "$name" ] && continue ;; esac
+    item "   $name"
+  done | head -30
+done
+if [ "$npm_found" -eq 0 ]; then
+  if command -v npm >/dev/null 2>&1; then
+    item "npm is installed but no global node_modules dir was found in the usual places - not probed further."
+  else
+    item "npm not installed."
+  fi
 fi
 
 # ── 3. shared tooling / provenance ───────────────────────────────────────────
