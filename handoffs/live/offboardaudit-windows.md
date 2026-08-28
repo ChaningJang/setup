@@ -25,12 +25,28 @@
   plus the 4-check empirical plan to run on the first Windows box.
   `lint.yml` runs `audit.ps1` under PSScriptAnalyzer and runs the read-only check.
 
+- **2026-08-27 — empirical proof, and two real bugs.** A portable `pwsh` 7.4.6
+  (unpacked in `$TMPDIR`, nothing installed) ran `audit.ps1` against a fixture
+  home via `tests/test_audit_ps1.sh`. Found and fixed:
+  1. `Get-GitOutput` returned a one-element array, which PowerShell unrolls to a
+     string, so `$o[0]` was the first *character*: every origin was `h`, every
+     repo read as non-IL, section 5 said "nothing to lose". Fixed with `return ,@(...)`
+     (also in `Get-CandidateRepo`).
+  2. `npm ls -g` wrote `_logs/*.log` + `_update-notifier-last-checked` into the
+     home dir. Same hole in `audit.sh`. Both now read global `node_modules` off disk.
+  After the fixes: 34/34 empirical checks pass, static checker PASS, PSScriptAnalyzer
+  1 Information note only, parser 0 errors. `audit.sh` re-proven on Chaning's Mac
+  with a full `~/.npm` mtime snapshot: unchanged, 19/5/13 totals unchanged.
+  Evidence: `PWSH=<pwsh> bash tests/test_audit_ps1.sh` -> "RESULT: PASS".
+
 ## In flight
-- Nothing. Committing README/lint/audit.ps1/checker is the last step.
+- Nothing.
 
 ## Next
-- Someone with a Windows box or `pwsh` runs README "Verifying the audit scripts"
-  checks 0-4. Until then `audit.ps1` is reviewed, not proven.
+- Someone with a real Windows box runs README "Verifying the audit scripts"
+  checks 0-4 under Windows PowerShell 5.1. The fixture proof was pwsh 7 on macOS;
+  the Windows-only probes (winget, HKLM, scheduled tasks, User env block) have
+  never executed.
 - Chaning decides whether to push. Pushing publishes the README "Known gaps"
   section about uninstall.sh.
 - Separate thread: the 4 uninstaller gaps. Not touched here.
@@ -58,6 +74,7 @@
 
 ## World assumptions
 - Emily Rosenzweig offboards ~2026-09-08, on **Windows**. ~2 weeks.
-- No Windows machine here; `pwsh` not installed on this Mac and must not be
-  installed. `audit.ps1` therefore has **no** empirical proof — only static.
+- No Windows machine here. `pwsh` was NOT installed on this Mac; a portable
+  7.4.6 tarball was unpacked into `$TMPDIR` for the test run and is gone with it.
+  CI (ubuntu) has pwsh, so the empirical test runs there on every push.
 - Do not contact Emily; Chaning owns that.

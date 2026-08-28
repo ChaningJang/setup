@@ -107,9 +107,32 @@ and bearer tokens. A human then decides the removal list from that report.
 unchanged across two runs, home-directory entry count unchanged, `.git/index`
 mtime unchanged, and an output scan for every secret pattern.
 
-`audit.ps1` has **not** had that treatment — it was written without access to a
-Windows machine. It is statically verified instead, by
-`tests/audit_readonly_check.py`, which runs in CI: it strips comments and
+`audit.ps1` was written without access to a Windows machine, so it is verified
+two ways, both in CI.
+
+**Empirically**, by `tests/test_audit_ps1.sh` (needs `pwsh`; ubuntu runners
+have it): it builds a fake Windows-shaped home in a temp dir — a receipt under
+`%LOCALAPPDATA%`, an IL repo with unpushed and uncommitted work, a second
+IL-org repo whose remote URL embeds a `ghp_` token, a personal repo, a
+`settings.json` with IL keys and a planted `sk-` key, a profile with an
+il-setup block, a `credentials.enc` — then runs the script twice and asserts:
+every mtime in the fixture unchanged, entry count unchanged, `.git/index`
+unchanged, no secret pattern and no unmasked email in the output, and that the
+report says the right things (REMOVE / KEEP / WORK AT RISK with the right
+counts). The shipped script refuses to run off Windows and has no test hook to
+bypass that; the test rewrites exactly one line of a *copy* and asserts only
+one line changed. This exercises everything except the Windows-only probes
+(winget, HKLM, scheduled tasks, the User environment block), which degrade to
+UNKNOWN as designed.
+
+Running it found two bugs the static check could not see: PowerShell unrolls a
+one-element array on `return`, so every git origin URL came back as its first
+character and every repo read as non-IL — section 5 would have said "nothing to
+lose" on a machine full of unpushed work; and `npm ls -g` wrote log files into
+the home directory (the same hole existed in `audit.sh`; both now read the
+global `node_modules` off disk).
+
+**Statically**, by `tests/audit_readonly_check.py`: it strips comments and
 string literals (keeping `$( ... )` subexpressions, which are real code) and
 then asserts that no write-capable operation survives — `Set-Content`,
 `Add-Content`, `Out-File`, `New-Item`, `Remove-Item`, `Move-Item`, `Copy-Item`,
@@ -122,8 +145,10 @@ the `>` / `>>` file-creating redirections. It also asserts that the only two
 `$env:` assignments are the process-local `GIT_OPTIONAL_LOCKS` and
 `GIT_TERMINAL_PROMPT`, and that every output line goes through the scrubber.
 
-**Run this on the first Windows box that is available, before sending
-`audit.ps1` to anyone.** These are the same four checks `audit.sh` passed.
+**Still run this on the first real Windows box, before sending `audit.ps1` to
+anyone.** The fixture run was under PowerShell 7.4 on macOS; Emily's machine
+runs Windows PowerShell 5.1, and the Windows-only probes have never executed.
+These are the same four checks `audit.sh` passed.
 
 ```powershell
 # 0. Syntax + linter, which cannot run on macOS
@@ -143,11 +168,15 @@ $before = $watch | Where-Object { Test-Path $_ } |
 $after  = $before | ForEach-Object { [PSCustomObject]@{ P=$_.P; T=(Get-Item $_.P).LastWriteTime } }
 Compare-Object $before $after -Property P,T   # MUST be empty
 
-# 2. Home-directory entry count unchanged (no stray file or dir created)
+# 2. Home-directory entry count unchanged (no stray file or dir created).
+#    Depth 1 misses writes deep in caches, so the npm cache is checked too -
+#    that is where the npm bug hid.
 $n1 = (Get-ChildItem $HOME -Force -Recurse -Depth 1 -EA SilentlyContinue).Count
+$c1 = (Get-ChildItem "$env:LOCALAPPDATA\npm-cache" -Force -Recurse -EA SilentlyContinue).Count
 .\audit.ps1 | Out-Null
 $n2 = (Get-ChildItem $HOME -Force -Recurse -Depth 1 -EA SilentlyContinue).Count
-"$n1 -> $n2"                                  # MUST be identical
+$c2 = (Get-ChildItem "$env:LOCALAPPDATA\npm-cache" -Force -Recurse -EA SilentlyContinue).Count
+"$n1 -> $n2 ; npm-cache $c1 -> $c2"           # MUST be identical
 
 # 3. .git\index mtime unchanged (proves GIT_OPTIONAL_LOCKS=0 took effect)
 #    covered by check 1; repeat per IL repo present on the machine.
@@ -158,8 +187,8 @@ $n2 = (Get-ChildItem $HOME -Force -Recurse -Depth 1 -EA SilentlyContinue).Count
     'PRIVATE KEY-----','(?i)bearer [A-Za-z0-9._-]{8,}'   # MUST be empty
 ```
 
-Until those four pass on real hardware, treat `audit.ps1` as reviewed but not
-proven.
+Until those four pass on real hardware, treat `audit.ps1` as proven under
+PowerShell 7 on a fixture, not on Windows.
 
 ### Step 2 — the uninstaller
 

@@ -18,7 +18,11 @@ jobs:
           # -Path takes a single String, so analyze each script and combine results.
           $r = @('bootstrap.ps1','uninstall.ps1','audit.ps1') | ForEach-Object { Invoke-ScriptAnalyzer -Path $_ -Severity Error }
           if ($r) { $r | Format-Table; exit 1 }
-      - name: audit.ps1 is read-only
+      - name: audit.ps1 is read-only (static)
         # audit.ps1 is handed to a departing consultant and run on a machine we
         # do not control, so its "writes nothing" promise is enforced in CI.
         run: python3 tests/audit_readonly_check.py
+      - name: audit.ps1 is read-only (empirical, pwsh on a fixture home)
+        # Runs the script twice against a fake Windows-shaped home and proves
+        # no mtime, entry count, or .git/index changed and no secret leaked.
+        run: bash tests/test_audit_ps1.sh

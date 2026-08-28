@@ -242,12 +242,16 @@ $script:HasGit = Test-CommandPresent 'git'
 # error swallowing are applied in exactly one place.
 function Get-GitOutput {
     param([string]$RepoPath, [string[]]$GitArgs)
-    if (-not $script:HasGit) { return @() }
+    # The leading comma matters: PowerShell unrolls a one-element array on
+    # return, so without it a single line of git output comes back as a plain
+    # string and $o[0] is its first CHARACTER, not the line. That silently made
+    # every origin URL read as "h" and every repo look non-IL.
+    if (-not $script:HasGit) { return ,@() }
     try {
         $out = & git --no-pager -C $RepoPath @GitArgs 2>$null
-        if ($null -eq $out) { return @() }
-        return @($out)
-    } catch { return @() }
+        if ($null -eq $out) { return ,@() }
+        return ,@($out)
+    } catch { return ,@() }
 }
 
 # ---- package-manager inventories (read-only, gathered once) ----------------
@@ -400,7 +404,8 @@ function Get-CandidateRepo {
         if ($found.Count -ge 60) { break }
     }
 
-    return @($found | Select-Object -Unique | Select-Object -First 60)
+    # Leading comma: keep a single repo as a one-element array (see Get-GitOutput).
+    return ,@($found | Select-Object -Unique | Select-Object -First 60)
 }
 
 function Get-RepoOrigin {
@@ -775,15 +780,27 @@ if (Test-Path -LiteralPath $startupDir -PathType Container) {
     }
 }
 
-Write-Sub 'Globally installed npm packages (names only)'
-if (Test-CommandPresent 'npm') {
-    $npmOut = @()
-    try { $npmOut = @(& npm ls -g --depth=0 2>$null) } catch { $npmOut = @() }
-    if ($npmOut.Count -gt 1) {
-        foreach ($l in ($npmOut | Select-Object -Skip 1 -First 30)) { Write-Item ($l | Out-String).Trim() }
-    } else {
-        Write-Item '(none reported)'
+# Read off disk, NOT via `npm ls -g`: running npm at all writes files under the
+# user's npm cache (_logs\*.log and _update-notifier-last-checked) - proven
+# empirically. Traced to bootstrap.ps1 line 543: npm install -g with the default
+# prefix, which on Windows is %APPDATA%\npm.
+Write-Sub 'Globally installed npm packages (names only, read from %APPDATA%\npm)'
+$npmGlobal = Join-Path $env:APPDATA 'npm\node_modules'
+if (Test-Path -LiteralPath $npmGlobal -PathType Container) {
+    $npmNames = New-Object System.Collections.ArrayList
+    foreach ($d in @(Get-ChildItem -LiteralPath $npmGlobal -Directory -Force -ErrorAction SilentlyContinue)) {
+        if ($d.Name -like '@*') {
+            foreach ($sd in @(Get-ChildItem -LiteralPath $d.FullName -Directory -ErrorAction SilentlyContinue)) {
+                [void]$npmNames.Add("$($d.Name)/$($sd.Name)")
+            }
+        } elseif ($d.Name -ne '.bin') {
+            [void]$npmNames.Add($d.Name)
+        }
     }
+    if ($npmNames.Count -eq 0) { Write-Item '(none)' }
+    else { foreach ($n in ($npmNames | Select-Object -First 30)) { Write-Item $n } }
+} elseif (Test-CommandPresent 'npm') {
+    Write-Item "npm is installed but $npmGlobal does not exist - global prefix is not the default; not probed further."
 } else {
     Write-Item 'npm not installed.'
 }
