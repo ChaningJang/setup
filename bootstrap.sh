@@ -15,7 +15,14 @@ set -euo pipefail
 # -----------------------------------------------------------------------------
 # Configuration
 # -----------------------------------------------------------------------------
-SETUP_RAW_BASE="https://raw.githubusercontent.com/ChaningJang/setup/main"
+# IL_SETUP_REF picks a branch to test before it reaches main, e.g.
+#   IL_SETUP_REF=bb-stage /bin/bash -c "$(curl -fsSL .../setup/bb-stage/bootstrap.sh)"
+SETUP_RAW_BASE="https://raw.githubusercontent.com/ChaningJang/setup/${IL_SETUP_REF:-main}"
+
+# The IL Setup plugin for bb (private repo; the GitHub sign-in above grants access).
+BB_PLUGIN_SOURCE="git:https://github.com/IrrationalLabs-team/bb-plugin-il@^0.1.0"
+BB_APP="/Applications/bb.app"
+BB_CLI="$BB_APP/Contents/Resources/app.asar.unpacked/node_modules/bb-app/host-daemon/dist/bb"
 LFS_MIN_SIZE=1000
 
 # Minimal fallback manifest if repos.json can't be fetched (offline / local run).
@@ -37,6 +44,8 @@ IL_BREW_INSTALLED=false
 IL_BUN_INSTALLED=false
 IL_CLAUDE_INSTALLED=false
 IL_GWS_INSTALLED=false
+IL_BB_INSTALLED=false
+SUDO_KEEPALIVE_PID=""
 IL_SETTINGS_TOUCHED=false  # we wrote IL keys into ~/.claude/settings.json
 IL_PRIOR_GIT_NAME=""
 IL_PRIOR_GIT_EMAIL=""
@@ -102,21 +111,68 @@ check_macos() {
     fi
 }
 
+# Ask for the Mac password once, up front, with instructions people can follow.
+# Everything later that needs admin rights (Apple's developer tools, Homebrew)
+# reuses it, so the password is the only prompt in the install phase.
+ensure_sudo() {
+    print_step "Your Mac password"
+    if ! sudo -n true 2>/dev/null; then
+        echo ""
+        echo -e "  ${BOLD}Type the password you use to log in to this Mac, then press Return.${NC}"
+        echo "  Nothing appears on screen while you type. That's normal: keep typing."
+        echo ""
+        if ! sudo -v; then
+            print_error "That password didn't work. Run the setup command again and retry."
+            exit 1
+        fi
+    fi
+    print_success "Got it"
+    # Keep it fresh for the rest of the run so nothing asks again.
+    ( while true; do sudo -n true 2>/dev/null; sleep 50; kill -0 "$$" 2>/dev/null || exit 0; done ) &
+    SUDO_KEEPALIVE_PID=$!
+    trap 'if [[ -n "$SUDO_KEEPALIVE_PID" ]]; then kill "$SUDO_KEEPALIVE_PID" 2>/dev/null || true; fi' EXIT
+}
+
+# Install Apple's command line developer tools without Apple's popup. The
+# popup failed on a fresh macOS 26.6 Mac on 2026-09-28 with a false "not enough
+# disk space" error while the command-line install of the same tools worked;
+# macOS was offering both the 26.6 and 27.0 tools at the time.
 ensure_xcode_cli() {
-    print_step "Checking Xcode Command Line Tools..."
+    print_step "Checking Apple's command line developer tools..."
 
     if xcode-select -p &>/dev/null; then
-        print_success "Xcode CLI tools already installed"
-    else
-        print_info "Installing Xcode Command Line Tools..."
-        print_info "A popup may appear — click 'Install' and wait for it to complete."
-        xcode-select --install 2>/dev/null || true
-
-        until xcode-select -p &>/dev/null; do
-            sleep 5
-        done
-        print_success "Xcode CLI tools installed"
+        print_success "Developer tools already installed"
+        return 0
     fi
+
+    print_info "Installing them now. This takes 5-15 minutes; there's nothing to click."
+    local marker="/tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress"
+    touch "$marker"
+    local labels label os_major
+    os_major="$(sw_vers -productVersion | cut -d. -f1)"
+    labels="$(softwareupdate -l 2>/dev/null | sed -n 's/^\* Label: \(Command Line Tools.*\)$/\1/p' || true)"
+    # Prefer the tools made for this macOS; the newest label can be for the next one.
+    label="$(printf '%s\n' "$labels" | grep "Xcode ${os_major}\." | sort -V | tail -1 || true)"
+    [[ -z "$label" ]] && label="$(printf '%s\n' "$labels" | sort -V | tail -1 || true)"
+    if [[ -n "$label" ]]; then
+        print_info "Installing: $label"
+        sudo softwareupdate -i "$label" 2>&1 | grep -v "^$" | sed 's/^/    /' || true
+    fi
+    rm -f "$marker"
+
+    if xcode-select -p &>/dev/null; then
+        print_success "Developer tools installed"
+        return 0
+    fi
+
+    # Fallback: Apple's own installer window.
+    print_warning "Couldn't install them automatically. Opening Apple's installer instead."
+    print_info "Click Install in the window that appears, then wait. This window carries on by itself."
+    xcode-select --install 2>/dev/null || true
+    until xcode-select -p &>/dev/null; do
+        sleep 5
+    done
+    print_success "Developer tools installed"
 }
 
 ensure_homebrew() {
@@ -125,8 +181,9 @@ ensure_homebrew() {
     if command_exists brew; then
         print_success "Homebrew already installed"
     else
-        print_info "Installing Homebrew (you may need to enter your password)..."
-        /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+        print_info "Installing Homebrew (a few minutes)..."
+        # NONINTERACTIVE: no "Press RETURN" prompt; it reuses the password from ensure_sudo.
+        NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
 
         # Add brew to PATH for Apple Silicon
         if [[ -f "/opt/homebrew/bin/brew" ]]; then
@@ -202,11 +259,28 @@ ensure_github_auth() {
         gh_user=$(gh auth status 2>&1 | grep -o "Logged in to github.com account [^ ]*" | cut -d" " -f6 || echo "unknown")
         print_success "Already authenticated with GitHub as $gh_user"
     else
-        print_info "Opening browser to authenticate with GitHub..."
-        print_info "Please click 'Authorize' when prompted in your browser."
+        # The old wording ("Opening browser...") hid that gh waits for Return
+        # first; people waited, the code expired, and setup stopped (2026-09-28).
+        echo ""
+        echo -e "  ${BOLD}Sign in to GitHub:${NC}"
+        echo "   1. A code like ABCD-1234 appears below. Copy it. It's here in Terminal, not in your email."
+        echo "   2. Press Return. GitHub opens in your browser."
+        echo "   3. Paste the code and click Authorize. This window carries on by itself."
+        echo "   If no browser opens, go to github.com/login/device and paste the code there."
         echo ""
 
-        gh auth login --web --git-protocol https
+        local attempt
+        for attempt in 1 2 3; do
+            if gh auth login --web --git-protocol https --hostname github.com; then
+                break
+            fi
+            if [[ $attempt -lt 3 ]]; then
+                print_warning "GitHub sign-in didn't finish. Codes expire after 15 minutes."
+                printf "  Press Return to get a new code: " > /dev/tty
+                read -r _ < /dev/tty || true
+            fi
+        done
+        gh auth setup-git 2>/dev/null || true
 
         if gh auth status &>/dev/null; then
             print_success "GitHub authentication successful"
@@ -675,6 +749,81 @@ ensure_gws_cli() {
     print_info "Next: restart Claude Code, then run /gws:setup and sign in with @irrationallabs.com"
 }
 
+# -----------------------------------------------------------------------------
+# bb, plus the IL Setup plugin inside it
+# -----------------------------------------------------------------------------
+# Official bb from its GitHub releases (checksum-verified), then the IL plugin
+# installed through bb's own CLI, so bb's auto-updates keep working and the
+# plugin keeps its own update channel.
+ensure_bb() {
+    print_step "Setting up bb..."
+
+    if [[ "$(uname -m)" != "arm64" ]]; then
+        print_warning "bb's Mac app needs an Apple Silicon Mac; skipping"
+        WARNINGS+=("bb not installed: this Mac isn't Apple Silicon")
+        return 0
+    fi
+
+    if [[ -d "$BB_APP" ]]; then
+        print_success "bb already installed"
+    else
+        local base="https://github.com/get-bb/bb/releases/latest/download"
+        local manifest zip want got tmp
+        if ! manifest="$(curl -fsSL "$base/latest-mac.yml")"; then
+            print_warning "Couldn't reach bb's download page; skipping bb"
+            WARNINGS+=("bb not installed: download failed. Re-run this command to retry.")
+            return 0
+        fi
+        zip="$(printf '%s\n' "$manifest" | awk '/^path:/{print $2}')"
+        want="$(printf '%s\n' "$manifest" | awk '/^sha512:/{print $2}')"
+        tmp="$(mktemp -d)"
+        print_info "Downloading bb (about 190 MB)..."
+        if ! curl -fL --progress-bar -o "$tmp/$zip" "$base/$zip"; then
+            rm -rf "$tmp"
+            print_warning "bb download failed; skipping"
+            WARNINGS+=("bb not installed: download failed. Re-run this command to retry.")
+            return 0
+        fi
+        got="$(shasum -a 512 "$tmp/$zip" | awk '{print $1}' | xxd -r -p | base64)"
+        if [[ -z "$want" || "$got" != "$want" ]]; then
+            rm -rf "$tmp"
+            print_error "The bb download didn't match its published checksum; not installing it"
+            WARNINGS+=("bb not installed: checksum mismatch. Re-run this command; if it repeats, tell Chaning.")
+            return 0
+        fi
+        ditto -x -k "$tmp/$zip" "$tmp/app"
+        mv "$tmp/app/bb.app" /Applications/ 2>/dev/null || sudo mv "$tmp/app/bb.app" /Applications/
+        rm -rf "$tmp"
+        IL_BB_INSTALLED=true
+        print_success "bb installed"
+    fi
+
+    print_info "Opening bb..."
+    open "$BB_APP"
+    local i
+    for i in $(seq 1 90); do
+        "$BB_CLI" status >/dev/null 2>&1 && break
+        sleep 2
+    done
+    if ! "$BB_CLI" status >/dev/null 2>&1; then
+        print_warning "bb didn't finish starting, so the IL Setup plugin wasn't added"
+        WARNINGS+=("IL Setup not added to bb: open bb, then re-run this command")
+        return 0
+    fi
+
+    if "$BB_CLI" plugin list 2>/dev/null | grep -q '^il@'; then
+        print_success "IL Setup plugin already in bb"
+    else
+        print_info "Adding the IL Setup plugin to bb..."
+        if "$BB_CLI" plugin install "$BB_PLUGIN_SOURCE" --yes >/tmp/il-bb-plugin-install.log 2>&1; then
+            print_success "IL Setup added to bb (left sidebar)"
+        else
+            print_warning "Couldn't add the IL Setup plugin (details: /tmp/il-bb-plugin-install.log)"
+            WARNINGS+=("IL Setup not added to bb: re-run this command, or send Chaning /tmp/il-bb-plugin-install.log")
+        fi
+    fi
+}
+
 load_manifest() {
     print_step "Loading repo list..."
     local fetched=""
@@ -724,7 +873,7 @@ select_repos() {
 
     # Interactive: build the access-filtered list
     print_step "Checking which repos you can access..."
-    local keys=() names=() descs=()
+    local keys=() names=() descs=() sizes=()
     local key slug
     while IFS= read -r key; do
         [[ -z "$key" ]] && continue
@@ -733,6 +882,7 @@ select_repos() {
             keys+=("$key")
             names+=("$(repo_field "$key" name)")
             descs+=("$(repo_field "$key" description)")
+            sizes+=("$(repo_field "$key" size)")
         fi
     done <<EOF
 $(all_repo_keys)
@@ -746,6 +896,7 @@ EOF
             keys+=("$key")
             names+=("$(repo_field "$key" name)")
             descs+=("$(repo_field "$key" description)")
+            sizes+=("$(repo_field "$key" size)")
         done <<EOF
 $(all_repo_keys)
 EOF
@@ -758,7 +909,11 @@ EOF
         local i num
         for i in "${!keys[@]}"; do
             num=$((i + 1))
-            printf "  %d) %s — %s\n" "$num" "${names[$i]}" "${descs[$i]}"
+            if [[ -n "${sizes[$i]:-}" ]]; then
+                printf "  %d) %s — %s (%s download)\n" "$num" "${names[$i]}" "${descs[$i]}" "${sizes[$i]}"
+            else
+                printf "  %d) %s — %s\n" "$num" "${names[$i]}" "${descs[$i]}"
+            fi
         done
         echo "  0) None (base tools only)"
         echo ""
@@ -825,9 +980,17 @@ print_completion() {
 
     echo ""
     echo -e "${BOLD}Next steps:${NC}"
-    echo "  1. Open a new terminal window (to pick up PATH changes)"
-    echo "  2. cd into a cloned repo and run:  claude"
-    echo "  3. Ask Claude: 'Give me a tour of this project'"
+    if [[ -d "$BB_APP" ]]; then
+        echo "  1. Go to bb (it's open). Click IL Setup in the left sidebar."
+        echo "  2. Finish the sign-ins there: Claude, then Google."
+    else
+        echo "  1. Use the NEW Terminal window that just opened. Type:  claude"
+    fi
+    echo ""
+    # This window can't see the tools it just installed (a shell only reads its
+    # settings when it starts), so hand people a fresh one instead of an error.
+    open -a Terminal "$HOME" 2>/dev/null || true
+    echo -e "  A new Terminal window just opened. ${BOLD}Use that one${NC}; this one doesn't know about the new tools yet."
     echo ""
     echo -e "${BOLD}If you run into issues:${NC}"
     echo "  • Re-run this script to repair problems"
@@ -889,6 +1052,7 @@ write_receipt() {
         --arg bun "$IL_BUN_INSTALLED" \
         --arg claude "$IL_CLAUDE_INSTALLED" \
         --arg gws "$IL_GWS_INSTALLED" \
+        --arg bbapp "$IL_BB_INSTALLED" \
         --arg gname "$IL_PRIOR_GIT_NAME" \
         --arg gemail "$IL_PRIOR_GIT_EMAIL" \
         --arg ghbefore "$IL_GH_AUTHED_BEFORE" \
@@ -902,6 +1066,7 @@ write_receipt() {
         | .bun_installed_by_us        = ((.bun_installed_by_us // false)        or ($bun == "true"))
         | .claude_code_installed_by_us= ((.claude_code_installed_by_us // false) or ($claude == "true"))
         | .gws_cli_installed_by_us    = ((.gws_cli_installed_by_us // false)    or ($gws == "true"))
+        | .bb_app_installed_by_us     = ((.bb_app_installed_by_us // false)     or ($bbapp == "true"))
         | (if (has("git_identity_prior")) then . else .git_identity_prior = {name: $gname, email: $gemail} end)
         | (if (has("gh_was_authenticated_before")) then . else .gh_was_authenticated_before = ($ghbefore == "true") end)
         ' "$path" > "$tmp" && mv "$tmp" "$path"
@@ -961,6 +1126,7 @@ main() {
     echo ""
 
     check_macos
+    ensure_sudo                 # the one password prompt, with instructions
     ensure_xcode_cli
     ensure_homebrew
     ensure_early_tools          # step 3: git, git-lfs, gh, jq, bun
@@ -985,6 +1151,8 @@ main() {
     else
         print_info "No repositories selected — base tools only"
     fi
+
+    ensure_bb
 
     echo ""
     write_receipt               # persist what this run changed (for the uninstaller)

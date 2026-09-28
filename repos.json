@@ -7,7 +7,8 @@
       "dir": "irrational_labs_hq",
       "setup": "hq",
       "default": true,
-      "description": "Main workspace — slides, templates, scripts"
+      "description": "Main workspace \u2014 slides, templates, scripts",
+      "size": "about 2 GB"
     },
     {
       "key": "marketing",
@@ -16,7 +17,8 @@
       "dir": "marketing_HQ",
       "setup": "generic",
       "default": false,
-      "description": "ActiveCampaign, conferences, LinkedIn, Substack"
+      "description": "ActiveCampaign, conferences, LinkedIn, Substack",
+      "size": "about 40 MB"
     },
     {
       "key": "experiments",
@@ -25,7 +27,8 @@
       "dir": "IL-experiments",
       "setup": "generic",
       "default": false,
-      "description": "Prolific / Netlify A/B experiment platform"
+      "description": "Prolific / Netlify A/B experiment platform",
+      "size": "about 20 MB"
     }
   ]
 }
