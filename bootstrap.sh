@@ -800,12 +800,15 @@ ensure_bb() {
 
     print_info "Opening bb..."
     open "$BB_APP"
+    # Wait for bb's server, not just the app: `bb status` succeeds before the
+    # server is listening, and a plugin install then fails with "Cannot connect
+    # to BB server" (seen on a fresh Mac, 2026-09-28). `plugin list` needs it.
     local i
     for i in $(seq 1 90); do
-        "$BB_CLI" status >/dev/null 2>&1 && break
+        "$BB_CLI" plugin list >/dev/null 2>&1 && break
         sleep 2
     done
-    if ! "$BB_CLI" status >/dev/null 2>&1; then
+    if ! "$BB_CLI" plugin list >/dev/null 2>&1; then
         print_warning "bb didn't finish starting, so the IL Setup plugin wasn't added"
         WARNINGS+=("IL Setup not added to bb: open bb, then re-run this command")
         return 0
