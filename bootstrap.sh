@@ -20,6 +20,12 @@ set -euo pipefail
 SETUP_RAW_BASE="https://raw.githubusercontent.com/ChaningJang/setup/${IL_SETUP_REF:-main}"
 
 # The IL Setup plugin for bb (private repo; the GitHub sign-in above grants access).
+# Homebrew 7 asks "Do you want to proceed with the installation? [y/n]" before
+# every install by default (found on a fresh Mac, 2026-09-28). Setup installs a
+# fixed list, so answer for the person.
+export HOMEBREW_NO_ASK=1
+export HOMEBREW_NO_ENV_HINTS=1
+
 BB_PLUGIN_SOURCE="git:https://github.com/IrrationalLabs-team/bb-plugin-il@^0.1.0"
 BB_APP="/Applications/bb.app"
 BB_CLI="$BB_APP/Contents/Resources/app.asar.unpacked/node_modules/bb-app/host-daemon/dist/bb"
