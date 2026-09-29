@@ -2,6 +2,8 @@
 # Irrational Labs — Uninstaller. Reverses what bootstrap.sh added, using the
 # receipt at ~/.config/il-setup/receipt.json. Run via:
 #   curl -fsSL https://raw.githubusercontent.com/ChaningJang/setup/main/uninstall.sh | bash
+# Test-flight machines (bb + IL Setup) need the test-flight copy, which knows
+# how to remove bb: .../setup/test-flight/uninstall.sh
 set -euo pipefail
 
 # ---- output helpers (mirror bootstrap.sh) ------------------------------------

@@ -6,6 +6,7 @@
 #
 # Usage (from any terminal):
 #   /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/ChaningJang/setup/main/bootstrap.sh)"
+#   (test flight: .../setup/test-flight/bootstrap.sh)
 #
 # This script is idempotent — safe to re-run to fix problems.
 # =============================================================================
@@ -15,9 +16,12 @@ set -euo pipefail
 # -----------------------------------------------------------------------------
 # Configuration
 # -----------------------------------------------------------------------------
-# IL_SETUP_REF picks a branch to test before it reaches main, e.g.
-#   IL_SETUP_REF=bb-stage /bin/bash -c "$(curl -fsSL .../setup/bb-stage/bootstrap.sh)"
-SETUP_RAW_BASE="https://raw.githubusercontent.com/ChaningJang/setup/${IL_SETUP_REF:-main}"
+# TEST FLIGHT: this branch fetches its own files (repos.json) from test-flight,
+# so the one-line command needs no extra settings:
+#   /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/ChaningJang/setup/test-flight/bootstrap.sh)"
+# When merging into main (planned for November), change the default below back
+# to main. IL_SETUP_REF still overrides it for testing another branch.
+SETUP_RAW_BASE="https://raw.githubusercontent.com/ChaningJang/setup/${IL_SETUP_REF:-test-flight}"
 
 # Homebrew 7 asks "Do you want to proceed with the installation? [y/n]" before
 # every install by default (found on a fresh Mac, 2026-09-28). Setup installs a
