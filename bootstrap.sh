@@ -184,6 +184,11 @@ ensure_xcode_cli() {
 ensure_homebrew() {
     print_step "Checking Homebrew..."
 
+    # Check the install location too: a shell that hasn't loaded Homebrew's
+    # PATH yet would otherwise reinstall it and append to ~/.zshrc again.
+    if [[ -x /opt/homebrew/bin/brew ]]; then
+        eval "$(/opt/homebrew/bin/brew shellenv)"
+    fi
     if command_exists brew; then
         print_success "Homebrew already installed"
     else
@@ -240,6 +245,10 @@ ensure_early_tools() {
     if ! command_exists npm;     then print_info "Installing Node (provides npm)..."; brew install node && record_formula_installed node; fi
     print_success "node $(node --version) / npm $(npm --version)"
 
+    # Same for Bun, which lives in ~/.bun/bin.
+    if [[ -x "$HOME/.bun/bin/bun" ]] && ! command_exists bun; then
+        export PATH="$HOME/.bun/bin:$PATH"
+    fi
     if command_exists bun; then
         print_success "bun $(bun --version)"
     else
