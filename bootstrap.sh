@@ -813,6 +813,14 @@ ensure_bb() {
         print_success "bb installed"
     fi
 
+    # Make `bb` a command in Terminal. The CLI ships inside the app and isn't
+    # on PATH, but the IL Setup skill tells people and agents to run `bb il …`.
+    # ~/.local/bin is already on PATH (Claude Code's installer uses it).
+    mkdir -p "$HOME/.local/bin"
+    if [[ ! -e "$HOME/.local/bin/bb" ]]; then
+        ln -s "$BB_CLI" "$HOME/.local/bin/bb" && print_success "bb command available in new Terminal windows"
+    fi
+
     print_info "Opening bb..."
     open "$BB_APP"
     # Wait for bb's server, not just the app: `bb status` succeeds before the

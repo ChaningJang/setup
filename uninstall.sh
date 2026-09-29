@@ -261,6 +261,10 @@ remove_bb() {
     if [[ -d /Applications/bb.app ]]; then
         run_cmd rm -rf /Applications/bb.app 2>/dev/null || run_cmd sudo rm -rf /Applications/bb.app
     fi
+    # The `bb` command link setup added (only if it still points into bb.app).
+    if [[ -L "$HOME/.local/bin/bb" && "$(readlink "$HOME/.local/bin/bb")" == /Applications/bb.app/* ]]; then
+        run_cmd rm -f "$HOME/.local/bin/bb"
+    fi
     local d
     for d in "$HOME/.bb" "$HOME/Library/Application Support/bb" "$HOME/Library/Caches/bb" "$HOME/Library/Caches/@bbdesktop-updater"; do
         [[ -e "$d" ]] && run_cmd rm -rf "$d"
