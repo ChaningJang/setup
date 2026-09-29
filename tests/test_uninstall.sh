@@ -9,8 +9,8 @@ source "$ROOT/uninstall.sh"
 fail=0
 
 test_preset_mapping() {
-    assert_eq "repos gws plugins gh gitid path" "$(categories_for_preset 1)" "preset 1 = IL footprint" || fail=1
-    assert_eq "repos gws plugins gh gitid path claude devtools" "$(categories_for_preset 2)" "preset 2 = everything-but-brew" || fail=1
+    assert_eq "repos gws plugins bb gh gitid path" "$(categories_for_preset 1)" "preset 1 = IL footprint" || fail=1
+    assert_eq "repos gws plugins bb gh gitid path claude devtools" "$(categories_for_preset 2)" "preset 2 = everything-but-brew" || fail=1
     assert_not_contains "$(categories_for_preset 2)" "brew" "preset 2 never includes homebrew" || fail=1
 }
 
@@ -27,6 +27,8 @@ test_strip_il_settings() {
     "gws@irrational-labs-plugins": true,
     "il-slides@irrational-labs-plugins": true,
     "key-behavior@irrational-labs-plugins": true,
+    "pipedrive@irrational-labs-plugins": false,
+    "figma-port@irrational-labs-plugins": true,
     "their-plugin@other-market": true
   }
 }
@@ -37,6 +39,7 @@ JSON
     assert_json "$f" '.extraKnownMarketplaces | has("someone-elses")' 'true' "other marketplace preserved" || fail=1
     assert_json "$f" '.enabledPlugins | has("gws@irrational-labs-plugins")' 'false' "IL plugin removed" || fail=1
     assert_json "$f" '.enabledPlugins | has("their-plugin@other-market")' 'true' "other plugin preserved" || fail=1
+    assert_json "$f" '[.enabledPlugins | keys[] | select(endswith("@irrational-labs-plugins"))] | length' '0' "every IL plugin removed, not just the defaults" || fail=1
     rm -f "$f"
 }
 
@@ -156,4 +159,16 @@ test_remove_gws_skips_when_not_ours
 test_remove_github_auth_gated
 test_remove_dev_tools_only_receipt_formulae
 test_run_category_dispatch
+test_remove_bb() {
+    local r; r="$(mktemp)"
+    echo '{"bb_app_installed_by_us": false}' > "$r"
+    RECEIPT_PATH="$r"; RECEIPT_FOUND=true
+    local out; out="$(IL_DRY_RUN=1 remove_bb 2>&1)"
+    assert_contains "$out" "not installed by setup" "bb left alone when setup didn't install it" || fail=1
+    echo '{"bb_app_installed_by_us": true}' > "$r"
+    out="$(IL_DRY_RUN=1 remove_bb 2>&1)"
+    assert_contains "$out" "DRYRUN: osascript" "bb quit first when setup installed it" || fail=1
+    rm -f "$r"
+}
+test_remove_bb
 exit $fail

@@ -47,8 +47,8 @@ load_receipt() {
 # Echo the category ids for a preset. Homebrew (brew) is never in a preset.
 categories_for_preset() {
     case "$1" in
-        1) echo "repos gws plugins gh gitid path" ;;
-        2) echo "repos gws plugins gh gitid path claude devtools" ;;
+        1) echo "repos gws plugins bb gh gitid path" ;;
+        2) echo "repos gws plugins bb gh gitid path claude devtools" ;;
         *) echo "" ;;
     esac
 }
@@ -61,9 +61,9 @@ strip_il_settings() {
     local tmp; tmp="$(mktemp)"
     if jq '
         del(.extraKnownMarketplaces["irrational-labs-plugins"])
-        | del(.enabledPlugins["gws@irrational-labs-plugins"])
-        | del(.enabledPlugins["il-slides@irrational-labs-plugins"])
-        | del(.enabledPlugins["key-behavior@irrational-labs-plugins"])
+        # Every IL plugin, not just the three defaults: IL Setup lets people
+        # switch any of them on.
+        | (if has("enabledPlugins") then .enabledPlugins |= with_entries(select(.key | endswith("@irrational-labs-plugins") | not)) else . end)
         | del(.env["GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND"])
         | (if (.env? // {}) == {} then del(.env) else . end)
     ' "$file" > "$tmp" 2>/dev/null; then
@@ -232,7 +232,40 @@ remove_homebrew() {
 }
 
 remove_plugins() {
+    # Uninstall through Claude Code first so its plugin cache goes too, then
+    # strip the settings keys as a backstop.
+    if command_exists claude; then
+        local id
+        for id in $(claude plugin list --json 2>/dev/null | jq -r '(.installed // .)[]?.id // empty' 2>/dev/null | grep '@irrational-labs-plugins$'); do
+            run_cmd claude plugin uninstall "$id" --scope user >/dev/null 2>&1 && print_success "Uninstalled $id"
+        done
+        run_cmd claude plugin marketplace remove irrational-labs-plugins >/dev/null 2>&1 || true
+    fi
     strip_il_settings "$HOME/.claude/settings.json"
+}
+
+# bb and everything in it (threads, the IL Setup plugin), but only if setup
+# installed bb. Threads can hold client work, which is why this sits in the
+# IL-footprint preset.
+remove_bb() {
+    if [[ "$RECEIPT_FOUND" != true || "$(jq -r '.bb_app_installed_by_us // false' "$RECEIPT_PATH")" != "true" ]]; then
+        print_info "bb was not installed by setup — leaving it"
+        return 0
+    fi
+    run_cmd osascript -e 'quit app "bb"' 2>/dev/null || true
+    [[ "${IL_DRY_RUN:-0}" == 1 ]] || sleep 2
+    # Exact process name only. Matching on the app path (pkill -f) also hits
+    # this uninstaller: pasted as `bash -c "$(curl …)"`, its own command line
+    # contains that path.
+    run_cmd pkill -x bb 2>/dev/null || true
+    if [[ -d /Applications/bb.app ]]; then
+        run_cmd rm -rf /Applications/bb.app 2>/dev/null || run_cmd sudo rm -rf /Applications/bb.app
+    fi
+    local d
+    for d in "$HOME/.bb" "$HOME/Library/Application Support/bb" "$HOME/Library/Caches/bb" "$HOME/Library/Caches/@bbdesktop-updater"; do
+        [[ -e "$d" ]] && run_cmd rm -rf "$d"
+    done
+    print_success "Removed bb and its data (threads, settings, the IL Setup plugin)"
 }
 
 remove_path_edits() {
@@ -255,6 +288,7 @@ run_category() {
         repos)    remove_repos ;;
         gws)      remove_gws ;;
         plugins)  remove_plugins ;;
+        bb)       remove_bb ;;
         gh)       remove_github_auth ;;
         gitid)    restore_git_identity ;;
         path)     remove_path_edits ;;
@@ -282,7 +316,7 @@ main() {
     fi
 
     echo ""
-    echo "  1) Recommended — remove IL footprint & access (repos, gws, IL plugins, GitHub login, git identity, PATH)"
+    echo "  1) Recommended — remove IL footprint & access (repos, gws, IL plugins, bb and its threads if setup installed it, GitHub login, git identity, PATH)"
     echo "  2) Everything the script installed (preset 1 + Claude Code, dev tools, Bun)"
     echo "  3) Custom — choose categories"
     echo "  4) Cancel"
@@ -295,7 +329,7 @@ main() {
         1) cats="$(categories_for_preset 1)" ;;
         2) cats="$(categories_for_preset 2)" ;;
         3)
-            local all="repos gws plugins gh gitid path claude devtools brew" id
+            local all="repos gws plugins bb gh gitid path claude devtools brew" id
             for id in $all; do
                 if confirm "Remove category '$id'?"; then cats="$cats $id"; fi
             done
