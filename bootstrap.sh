@@ -19,14 +19,18 @@ set -euo pipefail
 #   IL_SETUP_REF=bb-stage /bin/bash -c "$(curl -fsSL .../setup/bb-stage/bootstrap.sh)"
 SETUP_RAW_BASE="https://raw.githubusercontent.com/ChaningJang/setup/${IL_SETUP_REF:-main}"
 
-# The IL Setup plugin for bb (private repo; the GitHub sign-in above grants access).
 # Homebrew 7 asks "Do you want to proceed with the installation? [y/n]" before
 # every install by default (found on a fresh Mac, 2026-09-28). Setup installs a
 # fixed list, so answer for the person.
 export HOMEBREW_NO_ASK=1
 export HOMEBREW_NO_ENV_HINTS=1
 
-BB_PLUGIN_SOURCE="git:https://github.com/IrrationalLabs-team/bb-plugin-il@^0.1.0"
+# IL's bb plugin catalog and the IL Setup plugin in it (private repos; the
+# GitHub sign-in above grants access). Installing through the catalog links the
+# plugin to it, so updates show on bb's Plugins page and IL Setup's "bb
+# plugins" section works straight away.
+BB_MARKETPLACE_SOURCE="git:https://github.com/IrrationalLabs-team/bb-marketplace@main"
+BB_PLUGIN_ENTRY="il@il-plugins"
 BB_APP="/Applications/bb.app"
 BB_CLI="$BB_APP/Contents/Resources/app.asar.unpacked/node_modules/bb-app/host-daemon/dist/bb"
 LFS_MIN_SIZE=1000
@@ -840,8 +844,11 @@ ensure_bb() {
     if "$BB_CLI" plugin list 2>/dev/null | grep -q '^il@'; then
         print_success "IL Setup plugin already in bb"
     else
-        print_info "Adding the IL Setup plugin to bb..."
-        if "$BB_CLI" plugin install "$BB_PLUGIN_SOURCE" --yes >/tmp/il-bb-plugin-install.log 2>&1; then
+        print_info "Adding IL's plugin catalog and the IL Setup plugin to bb..."
+        if ! "$BB_CLI" marketplace list 2>/dev/null | grep -q 'il-plugins'; then
+            "$BB_CLI" marketplace add "$BB_MARKETPLACE_SOURCE" >/tmp/il-bb-plugin-install.log 2>&1 || true
+        fi
+        if "$BB_CLI" plugin install "$BB_PLUGIN_ENTRY" --yes >>/tmp/il-bb-plugin-install.log 2>&1; then
             print_success "IL Setup added to bb (left sidebar)"
         else
             print_warning "Couldn't add the IL Setup plugin (details: /tmp/il-bb-plugin-install.log)"
