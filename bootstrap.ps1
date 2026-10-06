@@ -437,12 +437,17 @@ function Ensure-GitIdentity {
     }
 
     $ghUserJson = gh api user 2>$null
-    if (-not $ghUserJson) {
+    # gh prints the error body on stdout too, so check the exit code, not just output.
+    if ($LASTEXITCODE -ne 0 -or -not $ghUserJson) {
         Print-Warning "Could not determine Git identity from GitHub — skipping"
         return
     }
 
-    $ghUser = $ghUserJson | ConvertFrom-Json
+    $ghUser = ($ghUserJson -join "`n") | ConvertFrom-Json
+    if (-not $ghUser.login) {
+        Print-Warning "Could not determine Git identity from GitHub — skipping"
+        return
+    }
     $ghName  = if ($ghUser.name) { $ghUser.name } else { $ghUser.login }
     $ghEmail = $ghUser.email
 
