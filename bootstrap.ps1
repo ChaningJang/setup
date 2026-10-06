@@ -3,10 +3,14 @@
 # =============================================================================
 # One-command setup for new team members on Windows.
 #
-# Usage (from PowerShell):
-#   irm https://raw.githubusercontent.com/ChaningJang/setup/main/bootstrap.ps1 | iex
+# Usage (from PowerShell, a normal window, not "Run as administrator"):
+#   irm https://raw.githubusercontent.com/ChaningJang/setup/test-flight/bootstrap.ps1 | iex
 #
-# This script is idempotent — safe to re-run to fix problems.
+# This script is idempotent — safe to re-run to fix problems. On a machine that
+# is already set up it only adds what's missing: nothing installed is replaced,
+# ~/.claude/settings.json is backed up before any edit and left alone if it
+# doesn't parse, and everything it does change goes in the receipt so
+# uninstall.ps1 can undo exactly that.
 # =============================================================================
 
 param(
@@ -14,12 +18,22 @@ param(
     [switch]$BaseOnly
 )
 
-$ErrorActionPreference = "Stop"
+# No script-wide $ErrorActionPreference = "Stop": under `irm | iex` it would
+# change the caller's own PowerShell session, and on Windows PowerShell 5.1 it
+# turns any native tool writing to a redirected stderr (gh, npm, git) into a
+# terminating error. Main sets "Continue" for its own scope instead.
 
 # -----------------------------------------------------------------------------
 # Configuration
 # -----------------------------------------------------------------------------
-$SETUP_RAW_BASE = "https://raw.githubusercontent.com/ChaningJang/setup/main"
+# Test flight: this branch fetches its own files. Switch to main with the
+# November merge (same as bootstrap.sh).
+$SETUP_RAW_BASE = if ($env:SETUP_RAW_BASE) { $env:SETUP_RAW_BASE } else { "https://raw.githubusercontent.com/ChaningJang/setup/test-flight" }
+# IL's bb plugin catalog and the IL Setup plugin in it (private repos), as in bootstrap.sh.
+$BB_MARKETPLACE_SOURCE = "git:https://github.com/IrrationalLabs-team/bb-marketplace@main"
+$BB_PLUGIN_ENTRY       = "il@il-plugins"
+$BB_RELEASES           = "https://github.com/get-bb/bb/releases/latest/download"
+$BB_CLI_RELATIVE       = "resources\app.asar.unpacked\node_modules\bb-app\host-daemon\dist\bb.cmd"
 $LFS_MIN_SIZE   = 1000
 $EMBEDDED_REPOS_JSON = '{"repos":[{"key":"hq","name":"Irrational Labs HQ","slug":"IrrationalLabs-team/irrational_labs_hq","dir":"irrational_labs_hq","setup":"hq","default":true,"description":"Main workspace"}]}'
 
@@ -37,6 +51,12 @@ $script:ILClaude     = $false
 $script:ILGws        = $false
 $script:ILGwsEnv     = $false     # we set the keyring-backend user env var
 $script:ILSettings   = $false     # we wrote IL keys into ~/.claude/settings.json
+$script:ILClaudeMethod = ""      # "native" = Anthropic's installer (~\.local\bin\claude.exe)
+$script:ILSettingsAdded = @()     # settings.json keys this run added (uninstall removes only these)
+$script:ILUserPath   = @()        # dirs we appended to the User PATH
+$script:ILBb         = $false     # we installed the bb app
+$script:ILBbShim     = ""         # the bb.cmd we put on PATH
+$script:HasScoop     = $false
 $script:ILPriorGitName  = ""
 $script:ILPriorGitEmail = ""
 $script:ILGhBefore      = $null
@@ -86,17 +106,24 @@ function Write-Receipt {
     foreach ($r in @(_arr $existing 'repos_cloned')) { if ($r.path -and -not $seen.ContainsKey($r.path)) { $repos += $r; $seen[$r.path]=$true } }
     foreach ($r in $script:ILRepos) { if ($r.path -and -not $seen.ContainsKey($r.path)) { $repos += $r; $seen[$r.path]=$true } }
 
-    $receipt = [ordered]@{
-        schema_version             = 1
-        formulae_installed_by_us   = @($formulae)
-        path_edits                 = @($paths)
-        repos_cloned               = @($repos)
-        brew_installed_by_us       = ((_bool $existing 'brew_installed_by_us') -or $script:ILBrew)
-        bun_installed_by_us        = ((_bool $existing 'bun_installed_by_us') -or $script:ILBun)
-        claude_code_installed_by_us= ((_bool $existing 'claude_code_installed_by_us') -or $script:ILClaude)
-        gws_cli_installed_by_us    = ((_bool $existing 'gws_cli_installed_by_us') -or $script:ILGws)
-        gws_env_set_by_us          = ((_bool $existing 'gws_env_set_by_us') -or $script:ILGwsEnv)
-    }
+    # Start from everything already there, so fields the IL Setup bb plugin
+    # wrote survive a re-run of this script.
+    $receipt = [ordered]@{}
+    foreach ($prop in $existing.PSObject.Properties) { $receipt[$prop.Name] = $prop.Value }
+    $receipt.schema_version              = 1
+    $receipt.formulae_installed_by_us    = @($formulae)
+    $receipt.path_edits                  = @($paths)
+    $receipt.repos_cloned                = @($repos)
+    $receipt.brew_installed_by_us        = ((_bool $existing 'brew_installed_by_us') -or $script:ILBrew)
+    $receipt.bun_installed_by_us         = ((_bool $existing 'bun_installed_by_us') -or $script:ILBun)
+    $receipt.claude_code_installed_by_us = ((_bool $existing 'claude_code_installed_by_us') -or $script:ILClaude)
+    $receipt.gws_cli_installed_by_us     = ((_bool $existing 'gws_cli_installed_by_us') -or $script:ILGws)
+    $receipt.gws_env_set_by_us           = ((_bool $existing 'gws_env_set_by_us') -or $script:ILGwsEnv)
+    $receipt.bb_app_installed_by_us      = ((_bool $existing 'bb_app_installed_by_us') -or $script:ILBb)
+    if ($script:ILClaudeMethod) { $receipt.claude_code_install_method = $script:ILClaudeMethod }
+    if ($script:ILBbShim) { $receipt.bb_cli_shim = $script:ILBbShim }
+    $receipt.user_path_added       = @((@(_arr $existing 'user_path_added') + $script:ILUserPath) | Sort-Object -Unique)
+    $receipt.claude_settings_added = @((@(_arr $existing 'claude_settings_added') + $script:ILSettingsAdded) | Sort-Object -Unique)
     if ($script:ILSettings) {
         $receipt.claude_settings = [ordered]@{ marketplace = "irrational-labs-plugins";
             plugins = @("gws@irrational-labs-plugins","il-slides@irrational-labs-plugins","key-behavior@irrational-labs-plugins") }
@@ -148,6 +175,68 @@ function Refresh-Path {
     $env:Path = "$machinePath;$userPath"
 }
 
+function Test-IsAdmin {
+    $id = [Security.Principal.WindowsIdentity]::GetCurrent()
+    return ([Security.Principal.WindowsPrincipal]$id).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+
+# Append a directory to the User PATH, once. Goes through the registry so
+# entries like %USERPROFILE%\... stay unexpanded and the value keeps its
+# REG_EXPAND_SZ type ([Environment]::SetEnvironmentVariable would flatten both).
+function Add-UserPathEntry([string]$Dir) {
+    $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey("Environment", $true)
+    $raw = [string]$key.GetValue("Path", "", [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+    $parts = @($raw -split ";" | Where-Object { $_ })
+    $expanded = @($parts | ForEach-Object { [Environment]::ExpandEnvironmentVariables($_).TrimEnd("\") })
+    if ($expanded -contains $Dir.TrimEnd("\")) { $key.Close(); return }
+    $key.SetValue("Path", (($parts + $Dir) -join ";"), [Microsoft.Win32.RegistryValueKind]::ExpandString)
+    $key.Close()
+    # Setting any user variable through .NET broadcasts the change, so new
+    # windows pick up the PATH without signing out.
+    [Environment]::SetEnvironmentVariable("IL_SETUP_PATH_REFRESH", "1", "User")
+    [Environment]::SetEnvironmentVariable("IL_SETUP_PATH_REFRESH", $null, "User")
+    $script:ILUserPath += $Dir
+    if (-not (($env:Path -split ";") -contains $Dir)) { $env:Path = "$env:Path;$Dir" }
+    Print-Success "Added $Dir to your PATH"
+}
+
+# ~/.claude/settings.json is the person's own file. Parse it or leave it
+# alone; back it up (once a day) before the first change; write only when the
+# edit changed something. $Edit gets the parsed object and returns $true if it
+# changed it.
+function Edit-ClaudeSettings([scriptblock]$Edit) {
+    $claudeDir = Join-Path $HOME ".claude"
+    $path = Join-Path $claudeDir "settings.json"
+    $settings = [PSCustomObject]@{}
+    if (Test-Path $path) {
+        $text = [System.IO.File]::ReadAllText($path)
+        if ($text.Trim()) {
+            try { $settings = $text | ConvertFrom-Json -ErrorAction Stop } catch { $settings = $null }
+            if ($settings -isnot [System.Management.Automation.PSCustomObject]) {
+                Print-Warning "$path isn't valid JSON, so I left it alone"
+                $script:Warnings += "~\.claude\settings.json isn't valid JSON, so IL settings weren't added. Fix it, then re-run setup."
+                return $false
+            }
+        }
+    }
+    $changed = [bool](& $Edit $settings)
+    if (-not $changed) { return $true }
+    if (-not (Test-Path $claudeDir)) { New-Item -ItemType Directory -Path $claudeDir -Force | Out-Null }
+    $backup = "$path.il-bak-$(Get-Date -Format yyyy-MM-dd)"
+    if ((Test-Path $path) -and -not (Test-Path $backup)) { Copy-Item $path $backup }
+    # BOM-free UTF-8 — Set-Content -Encoding UTF8 emits a BOM on PS 5.1, which
+    # breaks JSON parsers reading settings.json.
+    $json = $settings | ConvertTo-Json -Depth 32
+    [System.IO.File]::WriteAllText($path, $json, (New-Object System.Text.UTF8Encoding($false)))
+    $script:ILSettings = $true
+    return $true
+}
+
+function Set-JsonProp($obj, [string]$name, $value) {
+    if ($obj.PSObject.Properties.Name -contains $name) { $obj.$name = $value }
+    else { $obj | Add-Member -NotePropertyName $name -NotePropertyValue $value }
+}
+
 # -----------------------------------------------------------------------------
 # Setup Steps
 # -----------------------------------------------------------------------------
@@ -166,23 +255,35 @@ function Ensure-Winget {
     }
 }
 
+# Scoop only supplies the optional shell helpers and HQ media tools, so it
+# never stops setup. Its installer refuses to run as Administrator.
 function Ensure-Scoop {
     Print-Step "Checking Scoop..."
 
     if (Test-CommandExists "scoop") {
         Print-Success "Scoop already installed"
+    } elseif (Test-IsAdmin) {
+        Print-Warning "Skipping Scoop: it won't install from an Administrator window"
+        $script:Warnings += "Shell helpers (ripgrep, fd, bat, fzf, delta) skipped: re-run setup from a normal PowerShell window to get them"
+        return
     } else {
         Print-Info "Installing Scoop..."
-        Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser -Force
-        Invoke-RestMethod -Uri https://get.scoop.sh | Invoke-Expression
+        try {
+            if ((Get-ExecutionPolicy -Scope CurrentUser) -in @("Undefined", "Restricted")) {
+                Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser -Force
+            }
+            Invoke-RestMethod -Uri https://get.scoop.sh -ErrorAction Stop | Invoke-Expression
+        } catch { Print-Warning "Scoop installer failed: $($_.Exception.Message)" }
         Refresh-Path
         if (Test-CommandExists "scoop") {
             Print-Success "Scoop installed"
         } else {
-            Print-Error "Scoop installation failed"
-            throw "Scoop is required to continue"
+            Print-Warning "Scoop isn't available; skipping the optional shell helpers"
+            $script:Warnings += "Scoop didn't install, so the optional shell helpers were skipped"
+            return
         }
     }
+    $script:HasScoop = $true
 
     # Add extras bucket for some tools
     $buckets = scoop bucket list 2>$null | Select-String "extras"
@@ -223,11 +324,11 @@ function Ensure-EarlyTools {
     else { Print-Warning "gh may need a terminal restart" }
 
     if (-not (Test-CommandExists "jq")) {
-        scoop install jq 2>$null
+        winget install --id jqlang.jq --accept-source-agreements --accept-package-agreements -e
         Refresh-Path
-        if (Test-CommandExists "jq") { $script:ILFormulae += "jq" }
+        if (Test-CommandExists "jq") { $script:ILFormulae += "jqlang.jq" }
     }
-    Print-Success "jq ready"
+    if (Test-CommandExists "jq") { Print-Success "jq ready" } else { Print-Warning "jq may need a terminal restart" }
 
     # Node gives us npm, needed to install global CLI tools like the gws
     # (Google Workspace) CLI in Ensure-GwsCli.
@@ -243,7 +344,7 @@ function Ensure-EarlyTools {
         Print-Success "bun $(bun --version)"
     } else {
         Print-Info "Installing Bun..."
-        powershell -c "irm bun.sh/install.ps1 | iex"
+        powershell -NoProfile -ExecutionPolicy Bypass -Command "irm bun.sh/install.ps1 | iex"
         Refresh-Path
         $bunPath = "$HOME\.bun\bin"
         if (Test-Path $bunPath) { $env:Path = "$bunPath;$env:Path" }
@@ -251,7 +352,10 @@ function Ensure-EarlyTools {
             Print-Success "bun $(bun --version)"
             $script:ILBun = $true
         }
-        else { Print-Error "Bun installation failed"; throw "Bun is required" }
+        else {
+            Print-Warning "Bun didn't install; only IL HQ's own scripts need it"
+            $script:Warnings += "Bun didn't install. Only needed for IL HQ: re-run setup, or see https://bun.sh"
+        }
     }
 }
 
@@ -403,24 +507,13 @@ function Ensure-ClaudeCode {
     if (Test-CommandExists "claude") {
         Print-Success "Claude Code already installed"
     } else {
+        # Anthropic's native installer (user-level, no admin), same as the Mac
+        # script and the IL Setup panel. It puts claude.exe in ~\.local\bin.
         Print-Info "Installing Claude Code..."
-        bun install -g @anthropic-ai/claude-code 2>$null
+        powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://claude.ai/install.ps1 | iex"
+        Add-UserPathEntry (Join-Path $HOME ".local\bin")
         Refresh-Path
-        $bunBin = "$HOME\.bun\bin"
-        if (Test-Path $bunBin) { $env:Path = "$bunBin;$env:Path" }
-        if (Test-CommandExists "claude") { $script:ILClaude = $true }
-    }
-
-    # Persist bun global bin on the User PATH so future terminals find claude.
-    $bunBin = "$HOME\.bun\bin"
-    if (Test-Path $bunBin) {
-        $psProfile = $PROFILE.CurrentUserAllHosts
-        Add-IlPathBlock $psProfile "`$env:Path = `"$bunBin;`$env:Path`""
-        $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
-        if ($userPath -notlike "*$bunBin*") {
-            [Environment]::SetEnvironmentVariable("Path", "$userPath;$bunBin", "User")
-            Print-Success "Added $bunBin to your PATH"
-        }
+        if (Test-CommandExists "claude") { $script:ILClaude = $true; $script:ILClaudeMethod = "native" }
     }
 
     Refresh-Path
@@ -462,71 +555,59 @@ function Ensure-GwsKeyringEnv {
     $env:GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND = "file"
 
     # Belt and braces: also set it for Claude Code sessions directly.
-    $claudeDir = "$HOME\.claude"
-    if (-not (Test-Path $claudeDir)) { New-Item -ItemType Directory -Path $claudeDir -Force | Out-Null }
-    $settingsPath = "$claudeDir\settings.json"
-    if (Test-Path $settingsPath) {
-        try { $settings = Get-Content -Raw $settingsPath | ConvertFrom-Json } catch { $settings = [PSCustomObject]@{} }
-    } else { $settings = [PSCustomObject]@{} }
-    if (-not ($settings.PSObject.Properties.Name -contains "env")) {
-        $settings | Add-Member -NotePropertyName "env" -NotePropertyValue ([PSCustomObject]@{})
+    $ok = Edit-ClaudeSettings {
+        param($settings)
+        if (-not ($settings.PSObject.Properties.Name -contains "env")) { Set-JsonProp $settings "env" ([PSCustomObject]@{}) }
+        $had = $settings.env.PSObject.Properties.Name -contains "GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND"
+        if ($had -and $settings.env.GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND -eq "file") { return $false }
+        Set-JsonProp $settings.env "GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND" "file"
+        if (-not $had) { $script:ILSettingsAdded += "env.GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND" }
+        return $true
     }
-    if ($settings.env.PSObject.Properties.Name -contains "GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND") {
-        $settings.env."GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND" = "file"
-    } else {
-        $settings.env | Add-Member -NotePropertyName "GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND" -NotePropertyValue "file"
-    }
-    # BOM-free UTF-8 — Set-Content -Encoding UTF8 emits a BOM on PS 5.1, which
-    # breaks JSON parsers reading settings.json.
-    $json = $settings | ConvertTo-Json -Depth 12
-    [System.IO.File]::WriteAllText($settingsPath, $json, (New-Object System.Text.UTF8Encoding($false)))
-    $script:ILSettings = $true
-    Print-Success "Keyring guard set for Claude Code sessions too"
+    if ($ok) { Print-Success "Keyring guard set for Claude Code sessions too" }
 }
 
 function Ensure-IlClaudePlugins {
     Print-Step "Registering the Irrational Labs Claude Code plugins..."
 
-    $claudeDir = "$HOME\.claude"
-    if (-not (Test-Path $claudeDir)) { New-Item -ItemType Directory -Path $claudeDir -Force | Out-Null }
-    $settingsPath = "$claudeDir\settings.json"
-
-    if (Test-Path $settingsPath) {
-        try { $settings = Get-Content -Raw $settingsPath | ConvertFrom-Json } catch { $settings = [PSCustomObject]@{} }
-    } else { $settings = [PSCustomObject]@{} }
-
-    function Ensure-Prop($obj, $name, $value) {
-        if (-not ($obj.PSObject.Properties.Name -contains $name)) {
-            $obj | Add-Member -NotePropertyName $name -NotePropertyValue $value
+    $ok = Edit-ClaudeSettings {
+        param($settings)
+        $changed = $false
+        # Marketplace registration is always (re)set.
+        $marketplace = [PSCustomObject]@{
+            source = [PSCustomObject]@{
+                source = "github"
+                repo   = "IrrationalLabs-team/knowledge-work-plugins"
+            }
         }
-    }
-
-    # Marketplace registration is always (re)set.
-    $marketplace = [PSCustomObject]@{
-        source = [PSCustomObject]@{
-            source = "github"
-            repo   = "IrrationalLabs-team/knowledge-work-plugins"
+        if (-not ($settings.PSObject.Properties.Name -contains "extraKnownMarketplaces")) {
+            Set-JsonProp $settings "extraKnownMarketplaces" ([PSCustomObject]@{})
         }
-    }
-    Ensure-Prop $settings "extraKnownMarketplaces" ([PSCustomObject]@{})
-    if ($settings.extraKnownMarketplaces.PSObject.Properties.Name -contains "irrational-labs-plugins") {
-        $settings.extraKnownMarketplaces."irrational-labs-plugins" = $marketplace
-    } else {
-        $settings.extraKnownMarketplaces | Add-Member -NotePropertyName "irrational-labs-plugins" -NotePropertyValue $marketplace
-    }
-
-    # Default-on plugins — only set when the key is absent, so an explicit
-    # disable survives a re-run.
-    Ensure-Prop $settings "enabledPlugins" ([PSCustomObject]@{})
-    foreach ($p in @("gws@irrational-labs-plugins","il-slides@irrational-labs-plugins","key-behavior@irrational-labs-plugins")) {
-        if (-not ($settings.enabledPlugins.PSObject.Properties.Name -contains $p)) {
-            $settings.enabledPlugins | Add-Member -NotePropertyName $p -NotePropertyValue $true
+        $markets = $settings.extraKnownMarketplaces
+        if (-not ($markets.PSObject.Properties.Name -contains "irrational-labs-plugins")) {
+            Set-JsonProp $markets "irrational-labs-plugins" $marketplace
+            $script:ILSettingsAdded += "extraKnownMarketplaces.irrational-labs-plugins"
+            $changed = $true
+        } elseif (($markets."irrational-labs-plugins" | ConvertTo-Json -Depth 5 -Compress) -ne ($marketplace | ConvertTo-Json -Depth 5 -Compress)) {
+            Set-JsonProp $markets "irrational-labs-plugins" $marketplace
+            $changed = $true
         }
-    }
 
-    $json = $settings | ConvertTo-Json -Depth 12
-    [System.IO.File]::WriteAllText($settingsPath, $json, (New-Object System.Text.UTF8Encoding($false)))
-    $script:ILSettings = $true
+        # Default-on plugins — only set when the key is absent, so an explicit
+        # disable survives a re-run.
+        if (-not ($settings.PSObject.Properties.Name -contains "enabledPlugins")) {
+            Set-JsonProp $settings "enabledPlugins" ([PSCustomObject]@{})
+        }
+        foreach ($p in @("gws@irrational-labs-plugins","il-slides@irrational-labs-plugins","key-behavior@irrational-labs-plugins")) {
+            if (-not ($settings.enabledPlugins.PSObject.Properties.Name -contains $p)) {
+                Set-JsonProp $settings.enabledPlugins $p $true
+                $script:ILSettingsAdded += "enabledPlugins.$p"
+                $changed = $true
+            }
+        }
+        return $changed
+    }
+    if (-not $ok) { return }
     Print-Success "IL plugin marketplace registered"
     Print-Info "Default-on: gws, il-slides, key-behavior"
     Print-Info "Available on demand: pipedrive, figma-port, my-chief-of-staff, il-qol"
@@ -549,6 +630,151 @@ function Ensure-GwsCli {
     }
     Print-Info "Next: restart Claude Code, then run /gws:setup and sign in with @irrationallabs.com"
 }
+
+# -----------------------------------------------------------------------------
+# bb, plus the IL Setup plugin inside it
+# -----------------------------------------------------------------------------
+# Same as ensure_bb in bootstrap.sh: official bb from its GitHub releases
+# (checksum-verified), then the IL plugin through bb's own CLI, so bb's
+# auto-updates keep working and the plugin keeps its own update channel.
+# Windows bb (0.45+) is alpha and installs per user, no admin.
+
+function Get-BbInstallDir {
+    foreach ($root in @("HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall",
+                        "HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall")) {
+        $hit = Get-ChildItem $root -ErrorAction SilentlyContinue |
+            ForEach-Object { Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue } |
+            Where-Object { $_.DisplayName -match '^bb( |$)' -and $_.InstallLocation -and (Test-Path (Join-Path $_.InstallLocation "bb.exe")) } |
+            Select-Object -First 1
+        if ($hit) { return $hit.InstallLocation.TrimEnd("\") }
+    }
+    $default = Join-Path $env:LOCALAPPDATA "Programs\bb"
+    if (Test-Path (Join-Path $default "bb.exe")) { return $default }
+    return $null
+}
+
+function Install-Bb {
+    $ProgressPreference = "SilentlyContinue"   # PS 5.1's progress bar makes big downloads crawl
+    $tmp = Join-Path $env:TEMP ("il-bb-" + [guid]::NewGuid().ToString("N"))
+    New-Item -ItemType Directory -Path $tmp -Force | Out-Null
+    try {
+        try {
+            Invoke-WebRequest -UseBasicParsing -Uri "$BB_RELEASES/latest.yml" -OutFile "$tmp\latest.yml" -ErrorAction Stop
+        } catch {
+            Print-Warning "Couldn't reach bb's download page; skipping bb"
+            $script:Warnings += "bb not installed: download failed. Re-run this command to retry."
+            return $false
+        }
+        $manifest = Get-Content "$tmp\latest.yml"
+        $file = ($manifest | Select-String '^path:\s*(\S+)' | Select-Object -First 1).Matches.Groups[1].Value
+        $want = ($manifest | Select-String '^sha512:\s*(\S+)' | Select-Object -First 1).Matches.Groups[1].Value
+        if (-not $file -or -not $want) {
+            Print-Warning "bb's release manifest looked wrong; skipping bb"
+            $script:Warnings += "bb not installed: unexpected release manifest. Tell Chaning."
+            return $false
+        }
+        Print-Info "Downloading bb (about 180 MB)..."
+        try {
+            Invoke-WebRequest -UseBasicParsing -Uri "$BB_RELEASES/$file" -OutFile "$tmp\$file" -ErrorAction Stop
+        } catch {
+            Print-Warning "bb download failed; skipping"
+            $script:Warnings += "bb not installed: download failed. Re-run this command to retry."
+            return $false
+        }
+        $hex = (Get-FileHash -Algorithm SHA512 "$tmp\$file").Hash
+        $bytes = New-Object byte[] ($hex.Length / 2)
+        for ($i = 0; $i -lt $bytes.Length; $i++) { $bytes[$i] = [Convert]::ToByte($hex.Substring($i * 2, 2), 16) }
+        if ([Convert]::ToBase64String($bytes) -ne $want) {
+            Print-Error "The bb download didn't match its published checksum; not installing it"
+            $script:Warnings += "bb not installed: checksum mismatch. Re-run this command; if it repeats, tell Chaning."
+            return $false
+        }
+        Print-Info "Installing bb..."
+        Start-Process -FilePath "$tmp\$file" -ArgumentList "/S" -Wait
+        return $true
+    } finally {
+        Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
+    }
+}
+
+function Ensure-Bb {
+    Print-Step "Setting up bb..."
+
+    $dir = Get-BbInstallDir
+    if ($dir) {
+        Print-Success "bb already installed"
+    } else {
+        if (-not (Install-Bb)) { return }
+        $dir = Get-BbInstallDir
+        if (-not $dir) {
+            Print-Warning "bb's installer finished but bb isn't where expected; skipping the IL plugin"
+            $script:Warnings += "bb install couldn't be confirmed. Re-run this command; if it repeats, tell Chaning."
+            return
+        }
+        $script:ILBb = $true
+        Print-Success "bb installed"
+    }
+
+    # bb's command ships inside the app as bb.cmd, which runs on Node.
+    $cli = Join-Path $dir $BB_CLI_RELATIVE
+    if (-not (Test-Path $cli)) {
+        Print-Warning "This bb has no command-line tool where expected; skipping the IL plugin"
+        $script:Warnings += "IL Setup not added to bb: bb's command wasn't found. Tell Chaning which bb version you have."
+        return
+    }
+    if (-not (Test-CommandExists "node")) {
+        Print-Warning "bb's command needs Node, which isn't on PATH yet; skipping the IL plugin"
+        $script:Warnings += "IL Setup not added to bb: open a new PowerShell window and re-run this command"
+        return
+    }
+
+    # Make `bb` a command in new terminals: the IL Setup skill tells people and
+    # agents to run `bb il ...`. Never over an existing bb command.
+    $shimDir = Join-Path $HOME ".local\bin"
+    $shim = Join-Path $shimDir "bb.cmd"
+    if (-not (Test-CommandExists "bb") -and -not (Test-Path $shim)) {
+        New-Item -ItemType Directory -Path $shimDir -Force | Out-Null
+        $default = Join-Path $env:LOCALAPPDATA "Programs\bb"
+        $target = if ($dir -ieq $default) { "%LOCALAPPDATA%\Programs\bb\$BB_CLI_RELATIVE" } else { $cli }
+        [System.IO.File]::WriteAllText($shim, "@echo off`r`n`"$target`" %*`r`n", [System.Text.Encoding]::Default)
+        $script:ILBbShim = $shim
+        Add-UserPathEntry $shimDir
+        Print-Success "bb command available in new PowerShell windows"
+    }
+
+    Print-Info "Opening bb..."
+    if (-not (Get-Process -Name "bb" -ErrorAction SilentlyContinue)) { Start-Process (Join-Path $dir "bb.exe") }
+    # Wait for bb's server, not just the app: `plugin list` needs it (see bootstrap.sh).
+    $ready = $false
+    for ($i = 0; $i -lt 90; $i++) {
+        & $cli plugin list *> $null
+        if ($LASTEXITCODE -eq 0) { $ready = $true; break }
+        Start-Sleep -Seconds 2
+    }
+    if (-not $ready) {
+        Print-Warning "bb didn't finish starting, so the IL Setup plugin wasn't added"
+        $script:Warnings += "IL Setup not added to bb: open bb, then re-run this command"
+        return
+    }
+
+    if (@(& $cli plugin list 2>$null) -match '^il@') {
+        Print-Success "IL Setup plugin already in bb"
+        return
+    }
+    Print-Info "Adding IL's plugin catalog and the IL Setup plugin to bb..."
+    $log = Join-Path $env:TEMP "il-bb-plugin-install.log"
+    if (-not (@(& $cli marketplace list 2>$null) -match 'il-plugins')) {
+        & $cli marketplace add $BB_MARKETPLACE_SOURCE *> $log
+    }
+    & $cli plugin install $BB_PLUGIN_ENTRY --yes *>> $log
+    if ($LASTEXITCODE -eq 0) {
+        Print-Success "IL Setup added to bb (left sidebar)"
+    } else {
+        Print-Warning "Couldn't add the IL Setup plugin (details: $log)"
+        $script:Warnings += "IL Setup not added to bb: re-run this command, or send Chaning $log"
+    }
+}
+
 
 function Load-Manifest {
     Print-Step "Loading repo list..."
@@ -625,6 +851,7 @@ function Select-Repos {
 function Install-ShellHelpers {
     Print-Step "Installing shell helpers..."
     $helpers = @{ "ripgrep" = "rg"; "fd" = "fd"; "bat" = "bat"; "fzf" = "fzf"; "delta" = "delta" }
+    if (-not $script:HasScoop) { Print-Info "No Scoop — skipping"; return }
     foreach ($h in $helpers.GetEnumerator()) {
         if (-not (Test-CommandExists $h.Value)) {
             scoop install $h.Key 2>$null
@@ -723,12 +950,14 @@ function Clone-AndSetupRepo($key) {
 function Verify-Setup {
     Print-Step "Verifying setup..."
     $allGood = $true
-    $criticalCmds = @("git", "git-lfs", "gh", "bun", "jq")
+    $criticalCmds = @("git", "git-lfs", "gh", "node")
     foreach ($cmd in $criticalCmds) {
         if (Test-CommandExists $cmd) { Print-Success $cmd }
         else { Print-Error "$cmd not found"; $allGood = $false }
     }
-    if (Test-CommandExists "scoop") { Print-Success "scoop" } else { Print-Warning "scoop not in PATH" }
+    foreach ($cmd in @("jq", "bun", "scoop")) {
+        if (Test-CommandExists $cmd) { Print-Success $cmd } else { Print-Warning "$cmd not in PATH (optional)" }
+    }
     if (Test-CommandExists "claude") { Print-Success "claude" } else { Print-Warning "claude not in PATH (may need terminal restart)" }
     return $allGood
 }
@@ -747,9 +976,15 @@ function Print-Completion {
 
     Write-Host ""
     Write-Host "Next steps:"
-    Write-Host "  1. Open a new terminal window (to pick up PATH changes)"
-    Write-Host "  2. cd into a cloned repo and run:  claude"
-    Write-Host "  3. Ask Claude: 'Give me a tour of this project'"
+    if (Get-BbInstallDir) {
+        Write-Host "  1. Go to bb (it's open). Click IL Setup in the left sidebar."
+        Write-Host "     It checks this PC and signs you in to GitHub, Claude, and Google."
+        Write-Host "  2. Open a new PowerShell window to pick up PATH changes"
+    } else {
+        Write-Host "  1. Open a new terminal window (to pick up PATH changes)"
+        Write-Host "  2. cd into a cloned repo and run:  claude"
+        Write-Host "  3. Ask Claude: 'Give me a tour of this project'"
+    }
     Write-Host ""
     Write-Host "If you run into issues:"
     Write-Host "  • Re-run this script to repair problems"
@@ -762,6 +997,7 @@ function Print-Completion {
 # -----------------------------------------------------------------------------
 
 function Main {
+    $ErrorActionPreference = "Continue"   # this scope only; see the note at the top
     Write-Host ""
     Write-Host "Irrational Labs — Setup (Windows)" -ForegroundColor White
     Write-Host "This will install your dev tools, then ask which repos to clone."
@@ -791,10 +1027,21 @@ function Main {
         Print-Info "No repositories selected — base tools only"
     }
 
+    Ensure-Bb
+
     Write-Host ""
     Write-Receipt               # persist what this run changed (for the uninstaller)
     if (-not (Verify-Setup)) { Print-Warning "Setup completed with some issues" }
     Print-Completion
 }
 
-Main
+# Run from a saved copy or `irm | iex`: keep the caller's current directory,
+# and turn a stop into a message rather than a PowerShell stack trace.
+Push-Location
+try { Main }
+catch {
+    Print-Error "Setup stopped: $($_.Exception.Message)"
+    Print-Info "Fix that, then run the same command again. It picks up where it left off."
+    try { Write-Receipt } catch {}
+}
+finally { Pop-Location }
