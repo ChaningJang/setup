@@ -15,7 +15,8 @@
 
 param(
     [string]$Repos = "",       # comma-separated repo keys
-    [switch]$BaseOnly
+    [switch]$BaseOnly,
+    [string]$HomeRepo = ""     # personal home repo: new | skip | <repo>
 )
 
 # No script-wide $ErrorActionPreference = "Stop": under `irm | iex` it would
@@ -120,13 +121,16 @@ function Write-Receipt {
     $receipt.gws_cli_installed_by_us     = ((_bool $existing 'gws_cli_installed_by_us') -or $script:ILGws)
     $receipt.gws_env_set_by_us           = ((_bool $existing 'gws_env_set_by_us') -or $script:ILGwsEnv)
     $receipt.bb_app_installed_by_us      = ((_bool $existing 'bb_app_installed_by_us') -or $script:ILBb)
+    $receipt.claude_md_written       = ((_bool $existing 'claude_md_written') -or $script:ILClaudeMdWritten)
+    $receipt.claude_md_created_by_us = ((_bool $existing 'claude_md_created_by_us') -or $script:ILClaudeMdCreated)
+    if ($script:ILHomeCreated) { $receipt.home_repo_created = $script:ILHomeCreated }
     if ($script:ILClaudeMethod) { $receipt.claude_code_install_method = $script:ILClaudeMethod }
     if ($script:ILBbShim) { $receipt.bb_cli_shim = $script:ILBbShim }
     $receipt.user_path_added       = @((@(_arr $existing 'user_path_added') + $script:ILUserPath) | Sort-Object -Unique)
     $receipt.claude_settings_added = @((@(_arr $existing 'claude_settings_added') + $script:ILSettingsAdded) | Sort-Object -Unique)
     if ($script:ILSettings) {
         $receipt.claude_settings = [ordered]@{ marketplace = "irrational-labs-plugins";
-            plugins = @("gws@irrational-labs-plugins","il-slides@irrational-labs-plugins","key-behavior@irrational-labs-plugins") }
+            plugins = @("il-start@irrational-labs-plugins","gws@irrational-labs-plugins","il-slides@irrational-labs-plugins","key-behavior@irrational-labs-plugins") }
     } elseif ($existing.PSObject.Properties.Name -contains 'claude_settings') {
         $receipt.claude_settings = $existing.claude_settings
     }
@@ -603,7 +607,7 @@ function Ensure-IlClaudePlugins {
         if (-not ($settings.PSObject.Properties.Name -contains "enabledPlugins")) {
             Set-JsonProp $settings "enabledPlugins" ([PSCustomObject]@{})
         }
-        foreach ($p in @("gws@irrational-labs-plugins","il-slides@irrational-labs-plugins","key-behavior@irrational-labs-plugins")) {
+        foreach ($p in @("il-start@irrational-labs-plugins","gws@irrational-labs-plugins","il-slides@irrational-labs-plugins","key-behavior@irrational-labs-plugins")) {
             if (-not ($settings.enabledPlugins.PSObject.Properties.Name -contains $p)) {
                 Set-JsonProp $settings.enabledPlugins $p $true
                 $script:ILSettingsAdded += "enabledPlugins.$p"
@@ -614,7 +618,7 @@ function Ensure-IlClaudePlugins {
     }
     if (-not $ok) { return }
     Print-Success "IL plugin marketplace registered"
-    Print-Info "Default-on: gws, il-slides, key-behavior"
+    Print-Info "Default-on: il-start, gws, il-slides, key-behavior"
     Print-Info "Available on demand: pipedrive, figma-port, my-chief-of-staff, il-qol"
 }
 
@@ -778,6 +782,227 @@ function Ensure-Bb {
         Print-Warning "Couldn't add the IL Setup plugin (details: $log)"
         $script:Warnings += "IL Setup not added to bb: re-run this command, or send Chaning $log"
     }
+}
+
+
+# -----------------------------------------------------------------------------
+# IL instructions for Claude: a marker block in ~\.claude\CLAUDE.md
+# -----------------------------------------------------------------------------
+# Same rules as ensure_il_claude_md in bootstrap.sh: replace only between the
+# markers, never re-add a block the person deleted (IL_SETUP_CLAUDE_MD=1 puts it
+# back), leave a partial block alone, opt out with IL_SETUP_NO_CLAUDE_MD=1.
+# UTF-8 without a BOM, written through File.WriteAllText so a symlink stays one.
+$IL_MD_BEGIN = '<!-- IL-SETUP:BEGIN'
+$IL_MD_END   = '<!-- IL-SETUP:END -->'
+$script:ILClaudeMdWritten = $false
+$script:ILClaudeMdCreated = $false
+
+function Get-IlClaudeMdBlock {
+    $tmpl = $null
+    $local = if ($PSScriptRoot) { Join-Path $PSScriptRoot "templates\claude-md-block.md" } else { $null }
+    if ($local -and (Test-Path $local)) { $tmpl = [System.IO.File]::ReadAllText($local) }
+    else { try { $tmpl = (Invoke-WebRequest -UseBasicParsing -Uri "$SETUP_RAW_BASE/templates/claude-md-block.md" -ErrorAction Stop).Content } catch { $tmpl = $null } }
+    if (-not $tmpl -or -not $tmpl.Contains($IL_MD_BEGIN) -or -not $tmpl.Contains($IL_MD_END)) { return $null }
+    $name  = "$((git config --global user.name) 2>$null)".Trim()
+    $email = "$((git config --global user.email) 2>$null)".Trim()
+    $who = if ($name -and $email) { "$name <$email>" } elseif ("$name$email") { "$name$email" } else { "an IL teammate" }
+    return $tmpl.Replace("{{WHO}}", $who).Replace("`r`n", "`n").TrimEnd("`n")
+}
+
+function Write-Utf8NoBom([string]$Path, [string]$Text) {
+    [System.IO.File]::WriteAllText($Path, $Text, (New-Object System.Text.UTF8Encoding($false)))
+}
+
+function Ensure-IlClaudeMd {
+    Print-Step "Writing IL's instructions for Claude..."
+    if ($env:IL_SETUP_NO_CLAUDE_MD -eq "1") { Print-Info "Skipped (IL_SETUP_NO_CLAUDE_MD=1)"; return }
+    $block = Get-IlClaudeMdBlock
+    if (-not $block) {
+        Print-Warning "Couldn't load IL's instructions for Claude; skipping"
+        $script:Warnings += "IL instructions for Claude not written: re-run this command"
+        return
+    }
+    $dir = Join-Path $env:USERPROFILE ".claude"
+    $file = Join-Path $dir "CLAUDE.md"
+    if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+    if (-not (Test-Path $file)) {
+        Write-Utf8NoBom $file "$block`n"
+        $script:ILClaudeMdCreated = $true; $script:ILClaudeMdWritten = $true
+        Print-Success "IL instructions added to ~\.claude\CLAUDE.md"
+        return
+    }
+    $text = [System.IO.File]::ReadAllText($file)
+    $nb = ([regex]::Matches($text, [regex]::Escape($IL_MD_BEGIN))).Count
+    $ne = ([regex]::Matches($text, [regex]::Escape($IL_MD_END))).Count
+    $b = $text.IndexOf($IL_MD_BEGIN); $e = $text.IndexOf($IL_MD_END)
+    if ($nb -eq 0 -and $ne -eq 0) {
+        $receipt = $null
+        try { $receipt = Get-Content -Raw (Get-ReceiptPath) | ConvertFrom-Json } catch {}
+        if ($env:IL_SETUP_CLAUDE_MD -ne "1" -and $receipt -and $receipt.claude_md_written) {
+            Print-Info "You removed IL's block from ~\.claude\CLAUDE.md, so it stays out (IL_SETUP_CLAUDE_MD=1 adds it back)"
+            return
+        }
+        Backup-ClaudeMd $file
+        $nl = if ($text.Contains("`r`n")) { "`r`n" } else { "`n" }
+        $sep = if ($text.EndsWith("`n") -or $text.Length -eq 0) { "" } else { $nl }
+        Write-Utf8NoBom $file ($text + $sep + $nl + $block.Replace("`n", $nl) + $nl)
+        $script:ILClaudeMdWritten = $true
+        Print-Success "IL instructions added to ~\.claude\CLAUDE.md (your own text is unchanged)"
+        return
+    }
+    if ($nb -ne 1 -or $ne -ne 1 -or $e -lt $b) {
+        Print-Warning "~\.claude\CLAUDE.md has a partial IL block; left it alone"
+        $script:Warnings += "Fix ~\.claude\CLAUDE.md by hand: delete the IL-SETUP lines, then re-run this command"
+        return
+    }
+    $end = $e + $IL_MD_END.Length
+    $current = $text.Substring($b, $end - $b)
+    $nl = if ($current.Contains("`r`n")) { "`r`n" } else { "`n" }
+    $new = $block.Replace("`n", $nl)
+    $script:ILClaudeMdWritten = $true
+    if ($current -eq $new) { Print-Success "IL instructions for Claude already current"; return }
+    Backup-ClaudeMd $file
+    Write-Utf8NoBom $file ($text.Substring(0, $b) + $new + $text.Substring($end))
+    Print-Success "IL instructions in ~\.claude\CLAUDE.md updated"
+}
+
+function Backup-ClaudeMd([string]$File) {
+    $dir = Join-Path $env:LOCALAPPDATA "il-setup\backups"
+    if (Test-Path (Join-Path $dir "CLAUDE.md.*")) { return }
+    New-Item -ItemType Directory -Path $dir -Force | Out-Null
+    Copy-Item $File (Join-Path $dir ("CLAUDE.md." + (Get-Date -Format "yyyyMMdd-HHmmss")))
+}
+
+# -----------------------------------------------------------------------------
+# Personal home repo (see ensure_home_repo in bootstrap.sh)
+# -----------------------------------------------------------------------------
+$IL_ORG = "IrrationalLabs-team"
+$script:ILHomeCreated = ""
+
+function Get-HomeConfigPath { return (Join-Path $env:USERPROFILE ".config\il-setup\home.json") }
+
+function Get-HomeRepoCandidate {
+    $parts = @("$((git config --global user.name) 2>$null)".Trim().ToLower() -split '\s+' | Where-Object { $_ })
+    $first = if ($parts.Count) { $parts[0] -replace '[^a-z0-9-]', '' } else { "" }
+    if (-not $first) { $first = "$((gh api user -q .login) 2>$null)".Trim().ToLower() }
+    if (-not $first) { $first = "me" }
+    $base = "home-$first"
+    gh repo view "$IL_ORG/$base" *> $null
+    if ($LASTEXITCODE -eq 0 -and $parts.Count -gt 1) { $base = "home-$first-" + ($parts[-1] -replace '[^a-z0-9-]', '') }
+    return $base
+}
+
+function Ensure-HomeRepo {
+    Print-Step "Your personal home repo..."
+    $cfg = Get-HomeConfigPath
+    if (Test-Path $cfg) {
+        try { $h = Get-Content -Raw $cfg | ConvertFrom-Json; if ($h.repo) { Print-Success "Home repo: $($h.repo) ($($h.path))"; return } } catch {}
+    }
+    $answer = if ($HomeRepo) { $HomeRepo } elseif ($env:IL_SETUP_HOME) { $env:IL_SETUP_HOME } else { "" }
+    if (-not $answer -and $BaseOnly) { Print-Info "Skipped (-BaseOnly)"; return }
+    $candidate = Get-HomeRepoCandidate
+    if (-not $answer) {
+        Write-Host ""
+        Write-Host "Your home repo is where you start your day and keep your own notes."
+        Write-Host "Claude sends project work from there to the right IL repo."
+        Write-Host "  1) Create a private one: $IL_ORG/$candidate (default)"
+        Write-Host "  2) Use a repo you already have (type its name)"
+        Write-Host "  0) Skip for now"
+        $answer = Read-Host "Choice"
+        if (-not $answer -or $answer -eq "1") { $answer = "new" }
+        elseif ($answer -eq "0") { $answer = "skip" }
+        elseif ($answer -eq "2") { $answer = Read-Host "Repo name"; if (-not $answer) { $answer = "skip" } }
+    }
+    if ($answer -eq "skip") { Print-Info "Skipped. Re-run with -HomeRepo new whenever you like."; return }
+    if ($answer -eq "new") {
+        $slug = "$IL_ORG/$candidate"
+        gh repo view $slug *> $null
+        if ($LASTEXITCODE -ne 0) {
+            $who = "$((git config --global user.name) 2>$null)".Trim(); if (-not $who) { $who = "my" }
+            gh repo create $slug --private --description "$who's home: personal notes and memory, where their Claude sessions start" *> $null
+            if ($LASTEXITCODE -ne 0) {
+                Print-Warning "Couldn't create $slug (your GitHub account may not be allowed to create IL repos)"
+                $script:Warnings += "Home repo not created: ask in #bb-plug-in, then re-run with -HomeRepo new"
+                return
+            }
+            Print-Success "Created private repo $slug"
+            $script:ILHomeCreated = $slug
+        }
+    } elseif ($answer.Contains("/")) { $slug = $answer } else { $slug = "$IL_ORG/$answer" }
+    gh repo view $slug *> $null
+    if ($LASTEXITCODE -ne 0) {
+        Print-Warning "Can't see $slug on GitHub; skipping the home repo"
+        $script:Warnings += "Home repo not set: check the name, then re-run with -HomeRepo <repo>"
+        return
+    }
+    $name = $slug.Split("/")[-1]
+    $path = Join-Path $env:USERPROFILE $name
+    if (-not (Test-Path (Join-Path $path ".git"))) {
+        if (Test-Path $path) {
+            Print-Warning "$path already exists and isn't a git repo; skipping the home repo"
+            $script:Warnings += "Home repo not cloned: move $path aside, then re-run with -HomeRepo $slug"
+            return
+        }
+        gh repo clone $slug $path *> $null
+        if ($LASTEXITCODE -ne 0) { Print-Warning "Couldn't clone $slug"; $script:Warnings += "Home repo not cloned: re-run with -HomeRepo $slug"; return }
+        $script:ILRepos += @{ path = $path; created_dir = $true }
+    }
+    Seed-HomeRepo $path $slug
+    $cfgDir = Split-Path $cfg
+    if (-not (Test-Path $cfgDir)) { New-Item -ItemType Directory -Path $cfgDir -Force | Out-Null }
+    Write-Utf8NoBom $cfg ([PSCustomObject]@{ repo = $slug; path = $path; set_at = (Get-Date -Format "yyyy-MM-dd") } | ConvertTo-Json)
+    Print-Success "Home repo: $slug in $path"
+    $cli = $null
+    $bbDir = Get-BbInstallDir
+    if ($bbDir) { $cli = Join-Path $bbDir $BB_CLI_RELATIVE }
+    if ($cli -and (Test-Path $cli) -and (Test-CommandExists "node")) {
+        if (-not ((@(& $cli project list --json 2>$null) -join "") -match [regex]::Escape(($path -replace '\\', '\\')))) {
+            & $cli project create --name $name --root $path *> $null
+            if ($LASTEXITCODE -eq 0) { Print-Success "Added $name to bb as a project (start your threads there)" }
+        }
+    }
+}
+
+function Seed-HomeRepo([string]$Path, [string]$Slug) {
+    git -C $Path rev-parse --verify HEAD *> $null
+    if ($LASTEXITCODE -eq 0) { return }
+    $first = ("$((git config --global user.name) 2>$null)".Trim() -split '\s+')[0]; if (-not $first) { $first = "My" }
+    $today = Get-Date -Format "yyyy-MM-dd"
+    New-Item -ItemType Directory -Path (Join-Path $Path "memory") -Force | Out-Null
+    Write-Utf8NoBom (Join-Path $Path "README.md") @"
+# $first's home
+
+*Created: $today by IL setup*
+
+$first's personal home at Irrational Labs. Start your sessions here: notes,
+plans and drafts that don't belong to one project live here, and Claude sends
+project work to that project's repo. Private to you.
+"@
+    Write-Utf8NoBom (Join-Path $Path "CLAUDE.md") @"
+# $first's home
+
+*Created: $today by IL setup*
+
+This is $first's personal home repo at Irrational Labs: where their sessions
+start, and where personal notes, plans and memory live. Only they use it.
+
+- Personal notes, planning, and drafts that don't belong to one project: keep
+  them here. Commit and push to main; no PRs in this repo.
+- Work for a client or an IL project belongs in that project's repo. Route it
+  there: the il-start repo map lists them, and in bb you start it as a child
+  thread in that repo's project.
+- Memory: durable facts about how $first likes to work live in ``memory/``, one
+  fact per file with name/description/type frontmatter, each with a one-line
+  pointer in ``memory/MEMORY.md``. Read ``memory/MEMORY.md`` at session start, and
+  add to it when they tell you something worth keeping.
+"@
+    Write-Utf8NoBom (Join-Path $Path "memory\MEMORY.md") "# Memory index`n`nOne line per memory: ``- [Title](file.md): what it says``.`n"
+    git -C $Path add -A *> $null
+    git -C $Path commit -qm "Home repo: README, CLAUDE.md, memory/ (IL setup)" *> $null
+    git -C $Path branch -M main *> $null
+    git -C $Path push -qu origin main *> $null
+    if ($LASTEXITCODE -eq 0) { Print-Success "Home repo set up with README, CLAUDE.md and memory/" }
+    else { Print-Warning "Couldn't push the first commit to $Slug; it's saved locally in $Path" }
 }
 
 
@@ -1018,6 +1243,7 @@ function Main {
     Ensure-ClaudeCode          # step 5 (moved up; hardened in Task 8)
     Ensure-GwsKeyringEnv       # MUST precede any gws call — see the function comment
     Ensure-IlClaudePlugins
+    Ensure-IlClaudeMd
     Ensure-GwsCli              # step 5
     Load-Manifest              # step 6
     Select-Repos
@@ -1033,6 +1259,7 @@ function Main {
     }
 
     Ensure-Bb
+    Ensure-HomeRepo
 
     Write-Host ""
     Write-Receipt               # persist what this run changed (for the uninstaller)

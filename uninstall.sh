@@ -244,6 +244,43 @@ remove_plugins() {
         run_cmd claude plugin marketplace remove irrational-labs-plugins >/dev/null 2>&1 || true
     fi
     strip_il_settings "$HOME/.claude/settings.json"
+    remove_il_claude_md
+}
+
+# The IL marker block in ~/.claude/CLAUDE.md (see ensure_il_claude_md in
+# bootstrap.sh). Removes BEGIN..END inclusive plus the blank line setup put in
+# front of it; everything else stays. A partial block is left alone. The file
+# itself goes only if setup created it and nothing else is left in it. The
+# receipt's claude_md_written is cleared, so a later setup run adds it again.
+remove_il_claude_md() {
+    local file="$HOME/.claude/CLAUDE.md" b='<!-- IL-SETUP:BEGIN' e='<!-- IL-SETUP:END -->'
+    [[ -f "$file" ]] || { print_info "No ~/.claude/CLAUDE.md"; return 0; }
+    local nb ne
+    nb="$(grep -cF "$b" "$file" || true)"; ne="$(grep -cF "$e" "$file" || true)"
+    if [[ "$nb" == 0 && "$ne" == 0 ]]; then print_info "No IL block in ~/.claude/CLAUDE.md"; return 0; fi
+    if [[ "$nb" != 1 || "$ne" != 1 ]]; then
+        print_warning "~/.claude/CLAUDE.md has a partial IL block; left it alone"
+        WARNINGS+=("Remove the IL-SETUP lines from ~/.claude/CLAUDE.md by hand")
+        return 0
+    fi
+    if [[ "${IL_DRY_RUN:-0}" == 1 ]]; then echo "DRYRUN: remove IL block from $file"; return 0; fi
+    local tmp; tmp="$(mktemp)"
+    awk -v b="$b" -v e="$e" '
+        index($0, b) { skip = 1; if (held) held = 0 }
+        skip == 1    { if (index($0, e)) skip = 0; next }
+        { if (held) print ""; held = 0; if ($0 == "") { held = 1 } else print }
+        END { if (held) print "" }
+    ' "$file" > "$tmp" && cat "$tmp" > "$file"
+    rm -f "$tmp"
+    print_success "Removed IL's instructions from ~/.claude/CLAUDE.md"
+    if [[ "$RECEIPT_FOUND" == true ]]; then
+        if [[ "$(jq -r '.claude_md_created_by_us // false' "$RECEIPT_PATH")" == true ]] && ! grep -q '[^[:space:]]' "$file"; then
+            rm -f "$file" && print_success "Deleted ~/.claude/CLAUDE.md (setup created it and it's now empty)"
+        fi
+        tmp="$(mktemp)"
+        jq 'del(.claude_md_written, .claude_md_created_by_us)' "$RECEIPT_PATH" > "$tmp" && cat "$tmp" > "$RECEIPT_PATH"
+        rm -f "$tmp"
+    fi
 }
 
 # bb and everything in it (threads, the IL Setup plugin), but only if setup

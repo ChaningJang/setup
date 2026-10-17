@@ -38,6 +38,7 @@ BB_PLUGIN_ENTRY="il@il-plugins"
 BB_APP="/Applications/bb.app"
 BB_CLI="$BB_APP/Contents/Resources/app.asar.unpacked/node_modules/bb-app/host-daemon/dist/bb"
 LFS_MIN_SIZE=1000
+IL_ORG="IrrationalLabs-team"
 
 # Minimal fallback manifest if repos.json can't be fetched (offline / local run).
 EMBEDDED_REPOS_JSON='{"repos":[{"key":"hq","name":"Irrational Labs HQ","slug":"IrrationalLabs-team/irrational_labs_hq","dir":"irrational_labs_hq","setup":"hq","default":true,"description":"Main workspace"}]}'
@@ -45,6 +46,7 @@ EMBEDDED_REPOS_JSON='{"repos":[{"key":"hq","name":"Irrational Labs HQ","slug":"I
 # Runtime state
 FLAG_REPOS=""          # comma-separated repo keys, or empty
 FLAG_BASE_ONLY=false
+FLAG_HOME=""           # --home new|skip|<repo>
 REPOS_JSON=""          # loaded manifest (string)
 SELECTED_KEYS=()       # repo keys chosen to clone
 WARNINGS=()            # non-fatal issues, reprinted at the end
@@ -64,6 +66,9 @@ IL_SETTINGS_TOUCHED=false  # we wrote IL keys into ~/.claude/settings.json
 IL_PRIOR_GIT_NAME=""
 IL_PRIOR_GIT_EMAIL=""
 IL_GH_AUTHED_BEFORE=""
+IL_CLAUDE_MD_WRITTEN=false  # the IL block is in ~/.claude/CLAUDE.md after this run
+IL_CLAUDE_MD_CREATED=false  # this run created ~/.claude/CLAUDE.md itself
+IL_HOME_CREATED=""          # owner/repo of a home repo this run created (never deleted by uninstall)
 
 # Colors
 RED='\033[0;31m'
@@ -88,12 +93,14 @@ print_usage() {
 Irrational Labs setup
 
 Usage:
-  bootstrap.sh [--repos key1,key2] [--base-only]
+  bootstrap.sh [--repos key1,key2] [--base-only] [--home new|skip|<repo>]
 
 Options:
   --repos LIST   Comma-separated repo keys to clone (skips the menu).
                  e.g. --repos hq,marketing
   --base-only    Install base tools only; clone nothing.
+  --home X       Personal home repo: "new" creates IrrationalLabs-team/home-<firstname>
+                 (private), "skip" skips it, or name a repo you already have.
   -h, --help     Show this help.
 
 With no options, an interactive menu asks which repos to clone.
@@ -106,6 +113,8 @@ parse_args() {
             --repos)      FLAG_REPOS="${2:-}"; shift 2 ;;
             --repos=*)    FLAG_REPOS="${1#*=}"; shift ;;
             --base-only)  FLAG_BASE_ONLY=true; shift ;;
+            --home)       FLAG_HOME="${2:-}"; shift 2 ;;
+            --home=*)     FLAG_HOME="${1#*=}"; shift ;;
             -h|--help)    print_usage; exit 0 ;;
             *)            print_warning "Unknown option: $1"; shift ;;
         esac
@@ -731,6 +740,7 @@ ensure_il_claude_plugins() {
           "repo": "IrrationalLabs-team/knowledge-work-plugins"
         }
       }
+      | .enabledPlugins["il-start@irrational-labs-plugins"]     |= (if . == null then true else . end)
       | .enabledPlugins["gws@irrational-labs-plugins"]          |= (if . == null then true else . end)
       | .enabledPlugins["il-slides@irrational-labs-plugins"]    |= (if . == null then true else . end)
       | .enabledPlugins["key-behavior@irrational-labs-plugins"] |= (if . == null then true else . end)
@@ -738,7 +748,7 @@ ensure_il_claude_plugins() {
         mv "$tmp" "$settings"
         IL_SETTINGS_TOUCHED=true
         print_success "IL plugin marketplace registered"
-        print_info "Default-on: gws, il-slides, key-behavior"
+        print_info "Default-on: il-start, gws, il-slides, key-behavior"
         print_info "Available on demand: pipedrive, figma-port, my-chief-of-staff, il-qol"
         print_info "  install with: /plugin install <name>@irrational-labs-plugins"
     else
@@ -980,6 +990,300 @@ EOF
 }
 
 
+# -----------------------------------------------------------------------------
+# IL instructions for Claude: a marker block in ~/.claude/CLAUDE.md
+# -----------------------------------------------------------------------------
+# A short block of IL rules in the person's user-level CLAUDE.md, so every
+# Claude Code session (Terminal, the Desktop app's Code tab, bb) gets them. The
+# text is templates/claude-md-block.md. Re-runs replace only what's between the
+# markers, uninstall removes it, and nothing outside it is read or changed. A
+# block the person deleted after an earlier run stays deleted
+# (IL_SETUP_CLAUDE_MD=1 puts it back). Opt out: IL_SETUP_NO_CLAUDE_MD=1.
+# Writes go through `cat > file`, not mv, so a symlinked CLAUDE.md (dotfiles
+# repo) stays a symlink.
+
+IL_MD_BEGIN='<!-- IL-SETUP:BEGIN'
+IL_MD_END='<!-- IL-SETUP:END -->'
+
+load_claude_md_template() {
+    local here="${BASH_SOURCE[0]:-}"
+    if [[ -f "$here" && -f "$(dirname "$here")/templates/claude-md-block.md" ]]; then
+        cat "$(dirname "$here")/templates/claude-md-block.md"
+    else
+        curl -fsSL "$SETUP_RAW_BASE/templates/claude-md-block.md" 2>/dev/null
+    fi
+}
+
+# Fill {{WHO}} from the git identity. awk index/substr, not sed or ${//}: a
+# name can hold & or /, and bash 5.2 treats & in ${var//pat/rep} specially.
+render_claude_md_block() {
+    local name email who
+    name="$(git config --global user.name 2>/dev/null || true)"
+    email="$(git config --global user.email 2>/dev/null || true)"
+    if [[ -n "$name" && -n "$email" ]]; then who="$name <$email>"
+    elif [[ -n "$name$email" ]]; then who="$name$email"
+    else who="an IL teammate"; fi
+    printf '%s\n' "$1" | IL_WHO="$who" awk '{
+        out = ""; s = $0
+        while ((i = index(s, "{{WHO}}")) > 0) { out = out substr(s, 1, i - 1) ENVIRON["IL_WHO"]; s = substr(s, i + 7) }
+        print out s
+    }'
+}
+
+# Prints "ok" (one BEGIN before one END), "none", or "broken".
+il_md_block_state() {
+    local file="$1" b e
+    b="$(grep -cF "$IL_MD_BEGIN" "$file" 2>/dev/null || true)"
+    e="$(grep -cF "$IL_MD_END" "$file" 2>/dev/null || true)"
+    if [[ "${b:-0}" == 0 && "${e:-0}" == 0 ]]; then echo none; return; fi
+    if [[ "$b" == 1 && "$e" == 1 ]] &&
+       [[ "$(grep -nF "$IL_MD_BEGIN" "$file" | cut -d: -f1)" -lt "$(grep -nF "$IL_MD_END" "$file" | cut -d: -f1)" ]]; then
+        echo ok
+    else
+        echo broken
+    fi
+}
+
+ensure_il_claude_md() {
+    print_step "Writing IL's instructions for Claude..."
+    if [[ "${IL_SETUP_NO_CLAUDE_MD:-}" == 1 ]]; then
+        print_info "Skipped (IL_SETUP_NO_CLAUDE_MD=1)"
+        return 0
+    fi
+    local file="$HOME/.claude/CLAUDE.md" tmpl block state tmp
+    tmpl="$(load_claude_md_template)"
+    if [[ "$tmpl" != *"$IL_MD_BEGIN"* || "$tmpl" != *"$IL_MD_END"* ]]; then
+        print_warning "Couldn't load IL's instructions for Claude; skipping"
+        WARNINGS+=("IL instructions for Claude not written: re-run this command")
+        return 0
+    fi
+    block="$(render_claude_md_block "$tmpl")"
+    mkdir -p "$HOME/.claude"
+
+    if [[ ! -e "$file" ]]; then
+        printf '%s\n' "$block" > "$file"
+        IL_CLAUDE_MD_CREATED=true; IL_CLAUDE_MD_WRITTEN=true
+        print_success "IL instructions added to ~/.claude/CLAUDE.md"
+        return 0
+    fi
+
+    state="$(il_md_block_state "$file")"
+    if [[ "$state" == broken ]]; then
+        print_warning "~/.claude/CLAUDE.md has a partial IL block; left it alone"
+        WARNINGS+=("Fix ~/.claude/CLAUDE.md by hand: delete the IL-SETUP lines, then re-run this command")
+        return 0
+    fi
+    if [[ "$state" == none ]]; then
+        local receipt; receipt="$(il_receipt_path)"
+        if [[ "${IL_SETUP_CLAUDE_MD:-}" != 1 ]] && command_exists jq && [[ -f "$receipt" ]] &&
+           [[ "$(jq -r '.claude_md_written // false' "$receipt" 2>/dev/null)" == true ]]; then
+            print_info "You removed IL's block from ~/.claude/CLAUDE.md, so it stays out (IL_SETUP_CLAUDE_MD=1 adds it back)"
+            return 0
+        fi
+        backup_claude_md "$file"
+        printf '\n%s\n' "$block" >> "$file"
+        IL_CLAUDE_MD_WRITTEN=true
+        print_success "IL instructions added to ~/.claude/CLAUDE.md (your own text is unchanged)"
+        return 0
+    fi
+
+    local current
+    current="$(awk -v b="$IL_MD_BEGIN" -v e="$IL_MD_END" 'index($0,b){on=1} on{print} index($0,e){on=0}' "$file")"
+    if [[ "$current" == "$block" ]]; then
+        print_success "IL instructions for Claude already current"
+        IL_CLAUDE_MD_WRITTEN=true
+        return 0
+    fi
+    backup_claude_md "$file"
+    tmp="$(mktemp)"; printf '%s\n' "$block" > "$tmp.block"
+    awk -v b="$IL_MD_BEGIN" -v e="$IL_MD_END" -v blk="$tmp.block" '
+        index($0, b) { while ((getline l < blk) > 0) print l; skip = 1 }
+        skip != 1    { print }
+        index($0, e) { skip = 0 }
+    ' "$file" > "$tmp" && cat "$tmp" > "$file"
+    rm -f "$tmp" "$tmp.block"
+    IL_CLAUDE_MD_WRITTEN=true
+    print_success "IL instructions in ~/.claude/CLAUDE.md updated"
+}
+
+# One copy of the person's file from before setup first touched it.
+backup_claude_md() {
+    local dir="$HOME/.config/il-setup/backups"
+    ls "$dir"/CLAUDE.md.* >/dev/null 2>&1 && return 0
+    mkdir -p "$dir" && cp "$1" "$dir/CLAUDE.md.$(date +%Y%m%d-%H%M%S)"
+}
+
+# -----------------------------------------------------------------------------
+# Personal home repo
+# -----------------------------------------------------------------------------
+# Each person starts their day from one private repo of their own: notes,
+# memory, and the thread that routes everything else to its project repo.
+# Default: create IrrationalLabs-team/home-<firstname> (private), or use one
+# they already have. Cloned to ~/<name>, added to bb as a project, and
+# recorded in ~/.config/il-setup/home.json, which the il-start Claude plugin
+# reads. Non-interactive: --home new|skip|<repo>, or IL_SETUP_HOME.
+
+HOME_CONFIG="$HOME/.config/il-setup/home.json"
+
+home_repo_candidate() {
+    local first last base
+    first="$(git config --global user.name 2>/dev/null | awk '{print tolower($1)}' | tr -cd 'a-z0-9-')"
+    last="$(git config --global user.name 2>/dev/null | awk 'NF>1{print tolower($NF)}' | tr -cd 'a-z0-9-')"
+    [[ -n "$first" ]] || first="$(gh api user -q .login 2>/dev/null | tr 'A-Z' 'a-z')"
+    base="home-${first:-me}"
+    if gh repo view "$IL_ORG/$base" >/dev/null 2>&1 && [[ -n "$last" ]]; then
+        base="home-$first-$last"
+    fi
+    echo "$base"
+}
+
+ensure_home_repo() {
+    print_step "Your personal home repo..."
+    if [[ -f "$HOME_CONFIG" ]] && command_exists jq; then
+        local have; have="$(jq -r '.repo // empty' "$HOME_CONFIG" 2>/dev/null)"
+        if [[ -n "$have" ]]; then
+            print_success "Home repo: $have ($(jq -r '.path // ""' "$HOME_CONFIG"))"
+            return 0
+        fi
+    fi
+
+    local answer="${FLAG_HOME:-${IL_SETUP_HOME:-}}" candidate
+    if [[ -z "$answer" && "$FLAG_BASE_ONLY" == true ]]; then
+        print_info "Skipped (--base-only)"
+        return 0
+    fi
+    candidate="$(home_repo_candidate)"
+    if [[ -z "$answer" ]]; then
+        if [[ ! -r /dev/tty ]]; then
+            print_info "Skipped (no terminal to ask in; re-run with --home new)"
+            return 0
+        fi
+        {
+            echo ""
+            echo "Your home repo is where you start your day and keep your own notes."
+            echo "Claude sends project work from there to the right IL repo."
+            echo "  1) Create a private one: $IL_ORG/$candidate (default)"
+            echo "  2) Use a repo you already have (type its name, e.g. $IL_ORG/my-notes)"
+            echo "  0) Skip for now"
+            printf "Choice: "
+        } > /dev/tty
+        read -r answer < /dev/tty || answer=""
+        [[ -z "$answer" || "$answer" == 1 ]] && answer=new
+        [[ "$answer" == 0 ]] && answer=skip
+        if [[ "$answer" == 2 ]]; then
+            printf "Repo name: " > /dev/tty
+            read -r answer < /dev/tty || answer=skip
+            [[ -n "$answer" ]] || answer=skip
+        fi
+    fi
+
+    local slug
+    case "$answer" in
+        skip) print_info "Skipped. Re-run with --home new whenever you like."; return 0 ;;
+        new)
+            slug="$IL_ORG/$candidate"
+            if ! gh repo view "$slug" >/dev/null 2>&1; then
+                local who; who="$(git config --global user.name 2>/dev/null || echo "my")"
+                if ! gh repo create "$slug" --private \
+                        --description "$who's home: personal notes and memory, where their Claude sessions start" >/dev/null 2>&1; then
+                    print_warning "Couldn't create $slug (your GitHub account may not be allowed to create IL repos)"
+                    WARNINGS+=("Home repo not created: ask in #bb-plug-in, then re-run with --home new")
+                    return 0
+                fi
+                print_success "Created private repo $slug"
+                IL_HOME_CREATED="$slug"
+            fi
+            ;;
+        */*) slug="$answer" ;;
+        *)   slug="$IL_ORG/$answer" ;;
+    esac
+    if ! gh repo view "$slug" >/dev/null 2>&1; then
+        print_warning "Can't see $slug on GitHub; skipping the home repo"
+        WARNINGS+=("Home repo not set: check the name, then re-run with --home <repo>")
+        return 0
+    fi
+
+    local name="${slug##*/}" path
+    path="$HOME/$name"
+    if [[ ! -d "$path/.git" ]]; then
+        if [[ -e "$path" ]]; then
+            print_warning "$path already exists and isn't a git repo; skipping the home repo"
+            WARNINGS+=("Home repo not cloned: move $path aside, then re-run with --home $slug")
+            return 0
+        fi
+        gh repo clone "$slug" "$path" >/dev/null 2>&1 || {
+            print_warning "Couldn't clone $slug"
+            WARNINGS+=("Home repo not cloned: re-run with --home $slug")
+            return 0
+        }
+        record_repo_cloned "$path" true
+    fi
+    seed_home_repo "$path" "$slug"
+
+    mkdir -p "$(dirname "$HOME_CONFIG")"
+    jq -n --arg repo "$slug" --arg path "$path" --arg at "$(date +%F)" \
+        '{repo: $repo, path: $path, set_at: $at}' > "$HOME_CONFIG"
+    print_success "Home repo: $slug in $path"
+    add_bb_project "$path" "$name"
+}
+
+# An empty home repo gets the same minimal shape as a working one: README,
+# CLAUDE.md and memory/. A repo that already has commits is left as it is.
+seed_home_repo() {
+    local path="$1" slug="$2" first today
+    git -C "$path" rev-parse --verify HEAD >/dev/null 2>&1 && return 0
+    first="$(git config --global user.name 2>/dev/null | awk '{print $1}')"; first="${first:-My}"
+    today="$(date +%F)"
+    mkdir -p "$path/memory"
+    cat > "$path/README.md" <<MD
+# $first's home
+
+*Created: $today by IL setup*
+
+$first's personal home at Irrational Labs. Start your sessions here: notes,
+plans and drafts that don't belong to one project live here, and Claude sends
+project work to that project's repo. Private to you.
+MD
+    cat > "$path/CLAUDE.md" <<MD
+# $first's home
+
+*Created: $today by IL setup*
+
+This is $first's personal home repo at Irrational Labs: where their sessions
+start, and where personal notes, plans and memory live. Only they use it.
+
+- Personal notes, planning, and drafts that don't belong to one project: keep
+  them here. Commit and push to main; no PRs in this repo.
+- Work for a client or an IL project belongs in that project's repo. Route it
+  there: the il-start repo map lists them, and in bb you start it as a child
+  thread in that repo's project.
+- Memory: durable facts about how $first likes to work live in \`memory/\`, one
+  fact per file with name/description/type frontmatter, each with a one-line
+  pointer in \`memory/MEMORY.md\`. Read \`memory/MEMORY.md\` at session start, and
+  add to it when they tell you something worth keeping.
+MD
+    printf '# Memory index\n\nOne line per memory: `- [Title](file.md): what it says`.\n' > "$path/memory/MEMORY.md"
+    git -C "$path" add -A &&
+        git -C "$path" commit -qm "Home repo: README, CLAUDE.md, memory/ (IL setup)" &&
+        git -C "$path" branch -M main &&
+        git -C "$path" push -qu origin main >/dev/null 2>&1 &&
+        print_success "Home repo set up with README, CLAUDE.md and memory/" ||
+        print_warning "Couldn't push the first commit to $slug; it's saved locally in $path"
+}
+
+# Register a folder as a bb project when bb is installed and running.
+add_bb_project() {
+    local path="$1" name="$2" bbcli="${BB_CLI:-}"
+    [[ -n "$bbcli" && -x "$bbcli" ]] || bbcli="$(command -v bb 2>/dev/null || true)"
+    [[ -n "$bbcli" ]] || return 0
+    "$bbcli" project list --json 2>/dev/null | grep -qF "\"$path\"" && return 0
+    if "$bbcli" project create --name "$name" --root "$path" >/dev/null 2>&1; then
+        print_success "Added $name to bb as a project (start your threads there)"
+    else
+        print_info "Open bb and add $path as a project to start threads there"
+    fi
+}
+
 verify_setup() {
     print_step "Verifying setup..."
     local all_good=true cmd
@@ -1093,6 +1397,9 @@ write_receipt() {
         --arg gname "$IL_PRIOR_GIT_NAME" \
         --arg gemail "$IL_PRIOR_GIT_EMAIL" \
         --arg ghbefore "$IL_GH_AUTHED_BEFORE" \
+        --arg mdwritten "$IL_CLAUDE_MD_WRITTEN" \
+        --arg mdcreated "$IL_CLAUDE_MD_CREATED" \
+        --arg homecreated "$IL_HOME_CREATED" \
         '
         .schema_version = 1
         | .formulae_installed_by_us = (((.formulae_installed_by_us // []) + $formulae) | unique)
@@ -1104,6 +1411,9 @@ write_receipt() {
         | .claude_code_installed_by_us= ((.claude_code_installed_by_us // false) or ($claude == "true"))
         | .gws_cli_installed_by_us    = ((.gws_cli_installed_by_us // false)    or ($gws == "true"))
         | .bb_app_installed_by_us     = ((.bb_app_installed_by_us // false)     or ($bbapp == "true"))
+        | .claude_md_written          = ((.claude_md_written // false)          or ($mdwritten == "true"))
+        | .claude_md_created_by_us    = ((.claude_md_created_by_us // false)    or ($mdcreated == "true"))
+        | (if $homecreated != "" then .home_repo_created = $homecreated else . end)
         | (if (has("git_identity_prior")) then . else .git_identity_prior = {name: $gname, email: $gemail} end)
         | (if (has("gh_was_authenticated_before")) then . else .gh_was_authenticated_before = ($ghbefore == "true") end)
         ' "$path" > "$tmp" && mv "$tmp" "$path"
@@ -1173,6 +1483,7 @@ main() {
     ensure_claude_code          # step 5: Claude available before anything that can fail
     ensure_gws_keyring_env      # MUST precede any gws call — see the function comment
     ensure_il_claude_plugins
+    ensure_il_claude_md
     ensure_gws_cli
     load_manifest               # step 6
     select_repos
@@ -1190,6 +1501,7 @@ main() {
     fi
 
     ensure_bb
+    ensure_home_repo
 
     echo ""
     write_receipt               # persist what this run changed (for the uninstaller)

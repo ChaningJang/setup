@@ -215,7 +215,44 @@ function Remove-DevTools {
     if ((R-Bool "bun_installed_by_us") -and (Test-Path $bun)) { Run-Cmd { Remove-Item -Recurse -Force $bun } "Remove-Item $bun"; Print-Success "Removed Bun" }
 }
 
-function Remove-Plugins { Strip-IlSettings (Join-Path $env:USERPROFILE ".claude\settings.json") }
+# The IL block in ~\.claude\CLAUDE.md (see Ensure-IlClaudeMd in bootstrap.ps1):
+# BEGIN..END plus the blank line setup put before it. A partial block is left
+# alone; the file goes only if setup created it and nothing else is left.
+function Remove-IlClaudeMd {
+    $file = Join-Path $env:USERPROFILE ".claude\CLAUDE.md"
+    if (-not (Test-Path $file)) { return }
+    $b = '<!-- IL-SETUP:BEGIN'; $e = '<!-- IL-SETUP:END -->'
+    $text = [System.IO.File]::ReadAllText($file)
+    $nb = ([regex]::Matches($text, [regex]::Escape($b))).Count
+    $ne = ([regex]::Matches($text, [regex]::Escape($e))).Count
+    if ($nb -eq 0 -and $ne -eq 0) { Print-Info "No IL block in ~\.claude\CLAUDE.md"; return }
+    $bi = $text.IndexOf($b); $ei = $text.IndexOf($e)
+    if ($nb -ne 1 -or $ne -ne 1 -or $ei -lt $bi) {
+        Print-Warning "~\.claude\CLAUDE.md has a partial IL block; left it alone"
+        $script:Warnings += "Remove the IL-SETUP lines from ~\.claude\CLAUDE.md by hand"
+        return
+    }
+    $end = $ei + $e.Length
+    if ($text.Substring($end).StartsWith("`r`n")) { $end += 2 } elseif ($text.Substring($end).StartsWith("`n")) { $end += 1 }
+    $start = $bi
+    foreach ($sep in @("`r`n`r`n", "`n`n")) {
+        if ($start -ge $sep.Length -and $text.Substring($start - $sep.Length, $sep.Length) -eq $sep) { $start -= ($sep.Length / 2); break }
+    }
+    $new = $text.Substring(0, $start) + $text.Substring($end)
+    [System.IO.File]::WriteAllText($file, $new, (New-Object System.Text.UTF8Encoding($false)))
+    Print-Success "Removed IL's instructions from ~\.claude\CLAUDE.md"
+    if ((R-Bool "claude_md_created_by_us") -and -not $new.Trim()) { Remove-Item $file -Force; Print-Success "Deleted ~\.claude\CLAUDE.md (setup created it and it's now empty)" }
+    if (Has-Receipt) {
+        $script:Receipt.PSObject.Properties.Remove("claude_md_written")
+        $script:Receipt.PSObject.Properties.Remove("claude_md_created_by_us")
+        try { [System.IO.File]::WriteAllText((Get-ReceiptPath), ($script:Receipt | ConvertTo-Json -Depth 12), (New-Object System.Text.UTF8Encoding($false))) } catch {}
+    }
+}
+
+function Remove-Plugins {
+    Strip-IlSettings (Join-Path $env:USERPROFILE ".claude\settings.json")
+    Remove-IlClaudeMd
+}
 
 function Remove-PathEdits {
     if (Has-Receipt) {
