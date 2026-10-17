@@ -35,6 +35,7 @@ export HOMEBREW_NO_ENV_HINTS=1
 # plugins" section works straight away.
 BB_MARKETPLACE_SOURCE="git:https://github.com/IrrationalLabs-team/bb-marketplace@main"
 BB_PLUGIN_ENTRY="il@il-plugins"
+BB_DEFAULT_PLUGINS="il-projects@il-plugins project-files@il-plugins"
 BB_APP="/Applications/bb.app"
 BB_CLI="$BB_APP/Contents/Resources/app.asar.unpacked/node_modules/bb-app/host-daemon/dist/bb"
 LFS_MIN_SIZE=1000
@@ -818,6 +819,87 @@ ensure_gws_cli() {
 }
 
 # -----------------------------------------------------------------------------
+# Sign-ins (GUI mode only)
+# -----------------------------------------------------------------------------
+# IL Setup.app signs people in to Claude and Google here, before bb opens, so
+# its "You're set up" is true and bb's first-run screen shows Claude Code as
+# ready. Each opens the browser; the app shows a note beside it and comes back
+# to the front when the step ends. The Terminal path leaves both to IL Setup in
+# bb, which has its own sign-in buttons.
+
+claude_signed_in() {
+    command_exists claude && claude auth status --json 2>/dev/null | jq -e '.loggedIn == true' >/dev/null 2>&1
+}
+
+ensure_claude_signin() {
+    print_step "Signing in to Claude..."
+    export PATH="$HOME/.local/bin:$PATH"
+    if ! command_exists claude; then
+        print_warning "Claude Code isn't installed, so there's nothing to sign in to yet"
+        return 0
+    fi
+    if claude_signed_in; then
+        print_success "Already signed in to Claude"
+        return 0
+    fi
+    print_info "Your browser opens Claude's sign-in page. Sign in with your IL account and approve."
+    gui_mark expect browser claude
+    local attempt
+    for attempt in 1 2; do
+        claude auth login --claudeai </dev/null && break
+        claude_signed_in && break
+        [[ $attempt -lt 2 ]] && print_info "Sign-in didn't finish. Opening it again..."
+    done
+    if claude_signed_in; then
+        print_success "Signed in to Claude"
+    else
+        print_warning "Claude sign-in didn't finish. Finish it in IL Setup in bb."
+        WARNINGS+=("Claude sign-in not finished: use IL Setup in bb, or run IL Setup again")
+    fi
+}
+
+google_signed_in() {
+    command_exists gws && gws auth status 2>/dev/null \
+        | jq -e '(.encrypted_credentials_exists or .plain_credentials_exists) and ((.scope_count // 0) > 0)' >/dev/null 2>&1
+}
+
+# The IL OAuth client and the narrow scope list live in the IL gws Claude Code
+# plugin (IrrationalLabs-team/knowledge-work-plugins, gws/scripts). That plugin
+# isn't downloaded until Claude Code first runs, so fetch its two files with gh
+# (signed in by now; the repo is private to IL) and run the same script /gws:setup runs.
+ensure_google_signin() {
+    print_step "Signing in to Google..."
+    export GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND=file
+    if ! command_exists gws; then
+        print_warning "The gws CLI isn't installed, so Google sign-in waits for IL Setup in bb"
+        return 0
+    fi
+    if google_signed_in; then
+        print_success "Already signed in to Google"
+        return 0
+    fi
+    local tmp repo="IrrationalLabs-team/knowledge-work-plugins"
+    tmp="$(mktemp -d)"
+    if ! gh api "repos/$repo/contents/gws/scripts/auth-setup.sh" -H "Accept: application/vnd.github.raw" > "$tmp/auth-setup.sh" 2>/dev/null \
+       || ! gh api "repos/$repo/contents/gws/scripts/client_secret.json" -H "Accept: application/vnd.github.raw" > "$tmp/client_secret.json" 2>/dev/null; then
+        rm -rf "$tmp"
+        print_warning "Couldn't fetch IL's Google sign-in files. Finish it in IL Setup in bb."
+        WARNINGS+=("Google sign-in not finished: use IL Setup in bb")
+        return 0
+    fi
+    print_info "Your browser opens Google's sign-in page. Use your @irrationallabs.com account and click Allow."
+    gui_mark expect browser google
+    bash "$tmp/auth-setup.sh" </dev/null || true
+    rm -rf "$tmp"
+    if google_signed_in; then
+        print_success "Signed in to Google"
+    else
+        print_warning "Google sign-in didn't finish. Finish it in IL Setup in bb."
+        WARNINGS+=("Google sign-in not finished: use IL Setup in bb, or run IL Setup again")
+    fi
+}
+
+# -----------------------------------------------------------------------------
 # bb, plus the IL Setup plugin inside it
 # -----------------------------------------------------------------------------
 # Official bb from its GitHub releases (checksum-verified), then the IL plugin
@@ -904,6 +986,40 @@ ensure_bb() {
             WARNINGS+=("IL Setup not added to bb: re-run this command, or send Chaning /tmp/il-bb-plugin-install.log")
         fi
     fi
+
+    # IL's default bb plugins are installed, not left as toggles to find
+    # (Chaning, 2026-10-16). Assistant, Pocket and Talk to BB stay opt-in.
+    local entry
+    for entry in $BB_DEFAULT_PLUGINS; do
+        if ! "$BB_CLI" plugin list 2>/dev/null | grep -q "^${entry%@*}@"; then
+            if "$BB_CLI" plugin install "$entry" --yes >>/tmp/il-bb-plugin-install.log 2>&1; then
+                print_success "Added ${entry%@*} to bb"
+            else
+                print_warning "Couldn't add ${entry%@*} to bb; IL Setup in bb offers it again"
+            fi
+        fi
+    done
+
+    # Every repo cloned above becomes a bb project, so bb opens on IL's work.
+    add_repos_to_bb
+}
+
+add_repos_to_bb() {
+    local key dir name target existing
+    existing="$("$BB_CLI" project list --json 2>/dev/null | jq -r '.[]?.sources[]?.path' 2>/dev/null || true)"
+    for key in "${SELECTED_KEYS[@]:-}"; do
+        [[ -z "$key" ]] && continue
+        dir="$(repo_field "$key" dir)"; name="$(repo_field "$key" name)"
+        target="$HOME/$dir"
+        [[ -d "$target/.git" ]] || continue
+        if printf '%s\n' "$existing" | grep -qxF "$target"; then
+            print_info "$name is already a bb project"
+        elif "$BB_CLI" project create --name "$name" --root "$target" >/dev/null 2>&1; then
+            print_success "$name added to bb"
+        else
+            print_warning "Couldn't add $name to bb; add it from IL Setup in bb"
+        fi
+    done
 }
 
 load_manifest() {
@@ -1262,6 +1378,10 @@ main() {
     il_step gws      ensure_gws_keyring_env ensure_gws_cli
     il_step plugins  ensure_il_claude_plugins
     il_step repos    load_manifest select_repos install_shell_helpers clone_selected_repos   # steps 6-7
+    if [[ "$IL_GUI" == 1 ]]; then
+        il_step claude-signin ensure_claude_signin
+        il_step google-signin ensure_google_signin
+    fi
     il_step bb       ensure_bb
 
     echo ""
