@@ -61,6 +61,7 @@ WARNINGS=()            # non-fatal issues, reprinted at the end
 
 # ---- Receipt state (what this run changed; written to disk by write_receipt) -
 IL_FORMULAE_INSTALLED=()   # brew formulae we installed this run
+IL_CASKS_INSTALLED=()      # brew casks (everyday apps) we installed this run
 IL_PATH_PROFILES=()        # shell profiles we added the il-setup PATH block to
 IL_GWS_ENV_PROFILES=()     # shell profiles we added the il-setup:gws env block to
 IL_REPOS_CLONED=()         # "path|created_dir" entries
@@ -819,6 +820,45 @@ ensure_gws_cli() {
 }
 
 # -----------------------------------------------------------------------------
+# Everyday apps: Slack, Zoom, Wispr Flow, Granola
+# -----------------------------------------------------------------------------
+# Installed with Homebrew casks; people sign in to them later on their own, so
+# nothing here launches them. An app already in /Applications (or
+# ~/Applications), however it got there, counts as done: never reinstall over
+# someone's copy. Failures warn and move on.
+IL_APPS=("slack|Slack" "zoom|zoom.us" "wispr-flow|Wispr Flow" "granola|Granola")
+
+app_display_name() { case "$1" in zoom.us) echo "Zoom" ;; *) echo "$1" ;; esac; }
+
+ensure_everyday_apps() {
+    print_step "Installing everyday apps (Slack, Zoom, Wispr Flow, Granola)..."
+    if ! command_exists brew; then
+        print_warning "Homebrew isn't available, so the apps were skipped"
+        return 0
+    fi
+    local entry cask app name
+    for entry in "${IL_APPS[@]}"; do
+        cask="${entry%%|*}"; app="${entry#*|}"; name="$(app_display_name "$app")"
+        if [[ -d "/Applications/$app.app" || -d "$HOME/Applications/$app.app" ]]; then
+            print_success "$name already installed"
+            gui_mark app "$cask" ok "$name"
+            continue
+        fi
+        gui_mark app "$cask" start "$name"
+        print_info "Installing $name..."
+        if brew install --cask "$cask" </dev/null && [[ -d "/Applications/$app.app" || -d "$HOME/Applications/$app.app" ]]; then
+            record_cask_installed "$cask"
+            print_success "$name installed"
+            gui_mark app "$cask" ok "$name"
+        else
+            print_warning "Couldn't install $name. Get it from its website, or run IL Setup again later."
+            WARNINGS+=("$name not installed: download it from its website, or run IL Setup again")
+            gui_mark app "$cask" fail "$name"
+        fi
+    done
+}
+
+# -----------------------------------------------------------------------------
 # Sign-ins (GUI mode only)
 # -----------------------------------------------------------------------------
 # IL Setup.app signs people in to Claude and Google here, before bb opens, so
@@ -1246,6 +1286,7 @@ il_receipt_path() {
 }
 
 record_formula_installed() { IL_FORMULAE_INSTALLED+=("$1"); }
+record_cask_installed()    { IL_CASKS_INSTALLED+=("$1"); }
 record_path_profile()      { IL_PATH_PROFILES+=("$1"); }
 record_repo_cloned()       { IL_REPOS_CLONED+=("$1|$2"); }   # path, created_dir(true/false)
 
@@ -1277,8 +1318,9 @@ write_receipt() {
     mkdir -p "$(dirname "$path")"
     [[ -f "$path" ]] || echo '{}' > "$path"
 
-    local formulae_json profiles_json repos_json gwsenv_json
+    local formulae_json casks_json profiles_json repos_json gwsenv_json
     formulae_json="$(printf '%s\n' "${IL_FORMULAE_INSTALLED[@]:-}" | jq -R 'select(length>0)' | jq -s .)"
+    casks_json="$(printf '%s\n' "${IL_CASKS_INSTALLED[@]:-}"   | jq -R 'select(length>0)' | jq -s .)"
     profiles_json="$(printf '%s\n' "${IL_PATH_PROFILES[@]:-}"   | jq -R 'select(length>0)' | jq -s .)"
     gwsenv_json="$(printf '%s\n' "${IL_GWS_ENV_PROFILES[@]:-}"  | jq -R 'select(length>0)' | jq -s .)"
     repos_json="$(printf '%s\n' "${IL_REPOS_CLONED[@]:-}" \
@@ -1287,6 +1329,7 @@ write_receipt() {
     local tmp; tmp="$(mktemp)"
     jq \
         --argjson formulae "$formulae_json" \
+        --argjson casks "$casks_json" \
         --argjson profiles "$profiles_json" \
         --argjson gwsenv "$gwsenv_json" \
         --argjson repos "$repos_json" \
@@ -1302,6 +1345,7 @@ write_receipt() {
         '
         .schema_version = 1
         | .formulae_installed_by_us = (((.formulae_installed_by_us // []) + $formulae) | unique)
+        | .casks_installed_by_us = (((.casks_installed_by_us // []) + $casks) | unique)
         | .path_edits = (((.path_edits // []) + $profiles) | unique)
         | .gws_env_edits = (((.gws_env_edits // []) + $gwsenv) | unique)
         | .repos_cloned = (((.repos_cloned // []) + $repos) | unique_by(.path))
@@ -1399,6 +1443,7 @@ main() {
         il_step claude-signin ensure_claude_signin
         il_step google-signin ensure_google_signin
     fi
+    il_step apps     ensure_everyday_apps
     il_step bb       ensure_bb
 
     echo ""

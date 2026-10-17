@@ -644,6 +644,34 @@ function Ensure-GwsCli {
 # auto-updates keep working and the plugin keeps its own update channel.
 # Windows bb (0.45+) is alpha and installs per user, no admin.
 
+# Everyday apps (Slack, Zoom, Wispr Flow, Granola), same rules as the Mac:
+# people sign in later on their own, nothing is launched, an app that's
+# already installed (by any route winget can see) counts as done, and a
+# failure warns and moves on. Ids we install go in the receipt like the tools.
+function Ensure-EverydayApps {
+    Print-Step "Installing everyday apps (Slack, Zoom, Wispr Flow, Granola)..."
+    $apps = @(
+        @{ Id = "SlackTechnologies.Slack"; Name = "Slack" },
+        @{ Id = "Zoom.Zoom";               Name = "Zoom" },
+        @{ Id = "WisprFlow.WisprFlow";     Name = "Wispr Flow" },
+        @{ Id = "Granola.Granola";         Name = "Granola" }
+    )
+    foreach ($app in $apps) {
+        winget list --id $app.Id -e --accept-source-agreements 2>$null | Out-Null
+        if ($LASTEXITCODE -eq 0) { Print-Success "$($app.Name) already installed"; continue }
+        Print-Info "Installing $($app.Name)..."
+        winget install --id $app.Id -e --silent --accept-source-agreements --accept-package-agreements 2>$null | Out-Null
+        winget list --id $app.Id -e 2>$null | Out-Null
+        if ($LASTEXITCODE -eq 0) {
+            $script:ILFormulae += $app.Id
+            Print-Success "$($app.Name) installed"
+        } else {
+            Print-Warning "Couldn't install $($app.Name). Get it from its website, or run setup again later."
+            $script:Warnings += "$($app.Name) not installed: download it from its website, or run setup again"
+        }
+    }
+}
+
 function Get-BbInstallDir {
     foreach ($root in @("HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall",
                         "HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall")) {
@@ -1032,6 +1060,7 @@ function Main {
         Print-Info "No repositories selected — base tools only"
     }
 
+    Ensure-EverydayApps
     Ensure-Bb
 
     Write-Host ""

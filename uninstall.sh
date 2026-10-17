@@ -217,6 +217,13 @@ remove_dev_tools() {
         run_cmd brew uninstall "$f"
         print_success "Uninstalled $f"
     done
+    # Everyday apps (Slack, Zoom, Wispr Flow, Granola): only the casks setup itself installed.
+    local c
+    while IFS= read -r c; do
+        [[ -n "$c" ]] || continue
+        run_cmd brew uninstall --cask "$c"
+        print_success "Uninstalled $c"
+    done < <(jq -r '(.casks_installed_by_us // [])[]' "$RECEIPT_PATH")
     if [[ "$(jq -r '.bun_installed_by_us // false' "$RECEIPT_PATH")" == "true" && -d "$HOME/.bun" ]]; then
         run_cmd rm -rf "$HOME/.bun"
         print_success "Removed Bun (~/.bun)"
