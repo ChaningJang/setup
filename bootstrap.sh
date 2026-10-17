@@ -1002,6 +1002,23 @@ ensure_bb() {
 
     # Every repo cloned above becomes a bb project, so bb opens on IL's work.
     add_repos_to_bb
+
+    # IL Setup goes first in bb's navigation and is never tucked into "More",
+    # so people find it (Chaning's VM run, 2026-10-16: a bare briefcase icon).
+    pin_il_setup_in_bb
+}
+
+pin_il_setup_in_bb() {
+    local panel="il/setup" order visible
+    order="$("$BB_CLI" settings ui get sidebar.pluginPanelOrder --json 2>/dev/null | jq -c '.value // []' 2>/dev/null || echo '[]')"
+    order="$(echo "${order:-[]}" | jq -c --arg p "$panel" '[$p] + map(select(. != $p))' 2>/dev/null || echo "[\"$panel\"]")"
+    "$BB_CLI" settings ui set sidebar.pluginPanelOrder "$order" >/dev/null 2>&1 || true
+    visible="$("$BB_CLI" settings ui get sidebar.visiblePluginPanels --json 2>/dev/null | jq -c '.value' 2>/dev/null || echo null)"
+    if [[ -n "$visible" && "$visible" != "null" ]]; then
+        visible="$(echo "$visible" | jq -c --arg p "$panel" 'if index($p) then . else . + [$p] end')"
+        "$BB_CLI" settings ui set sidebar.visiblePluginPanels "$visible" >/dev/null 2>&1 || true
+    fi
+    print_success "IL Setup pinned first in bb's sidebar"
 }
 
 add_repos_to_bb() {
