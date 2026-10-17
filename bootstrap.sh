@@ -42,6 +42,15 @@ LFS_MIN_SIZE=1000
 # Minimal fallback manifest if repos.json can't be fetched (offline / local run).
 EMBEDDED_REPOS_JSON='{"repos":[{"key":"hq","name":"Irrational Labs HQ","slug":"IrrationalLabs-team/irrational_labs_hq","dir":"irrational_labs_hq","setup":"hq","default":true,"description":"Main workspace"}]}'
 
+# GUI mode: IL Setup.app runs this script with IL_SETUP_GUI=1. It reads
+# "::il:: ..." marker lines from stdout to drive its checklist, answers
+# questions through IL_SETUP_ANSWER_FIFO instead of /dev/tty (the app has no
+# terminal), and supplies the Mac password through SUDO_ASKPASS (with DISPLAY
+# set, so plain `sudo` uses it too). Unset, nothing changes.
+IL_GUI="${IL_SETUP_GUI:-}"
+IL_CUR_STEP=""         # checklist step now running (GUI mode)
+IL_STEP_WARNED=false   # a warning was printed during that step
+
 # Runtime state
 FLAG_REPOS=""          # comma-separated repo keys, or empty
 FLAG_BASE_ONLY=false
@@ -65,13 +74,14 @@ IL_PRIOR_GIT_NAME=""
 IL_PRIOR_GIT_EMAIL=""
 IL_GH_AUTHED_BEFORE=""
 
-# Colors
+# Colors (none in GUI mode: the app shows the raw log as plain text)
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 BOLD='\033[1m'
 NC='\033[0m'
+if [[ "$IL_GUI" == 1 ]]; then RED=''; GREEN=''; YELLOW=''; BLUE=''; BOLD=''; NC=''; fi
 
 # -----------------------------------------------------------------------------
 # Helper Functions
@@ -79,9 +89,30 @@ NC='\033[0m'
 
 print_step()    { echo -e "\n${BLUE}${BOLD}▶ $1${NC}"; }
 print_success() { echo -e "${GREEN}✓ $1${NC}"; }
-print_warning() { echo -e "${YELLOW}⚠ $1${NC}"; }
-print_error()   { echo -e "${RED}✗ $1${NC}"; }
+print_warning() { echo -e "${YELLOW}⚠ $1${NC}"; IL_STEP_WARNED=true; gui_mark warn "$1"; }
+print_error()   { echo -e "${RED}✗ $1${NC}"; IL_STEP_WARNED=true; gui_mark warn "$1"; }
 print_info()    { echo -e "  $1"; }
+
+# One machine-readable line for IL Setup.app; a no-op outside GUI mode.
+gui_mark() { if [[ "$IL_GUI" == 1 ]]; then echo "::il:: $*"; fi; return 0; }
+
+# il_step <id> <function>...  runs the functions as one checklist step. A
+# failure exits through il_on_exit, which marks the step failed.
+il_step() {
+    local id="$1" fn; shift
+    IL_CUR_STEP="$id"; IL_STEP_WARNED=false
+    gui_mark step "$id" start
+    for fn in "$@"; do "$fn"; done
+    if [[ "$IL_STEP_WARNED" == true ]]; then gui_mark step "$id" warn; else gui_mark step "$id" ok; fi
+    IL_CUR_STEP=""
+}
+
+il_on_exit() {
+    local rc=$?
+    if [[ -n "$SUDO_KEEPALIVE_PID" ]]; then kill "$SUDO_KEEPALIVE_PID" 2>/dev/null || true; fi
+    if [[ $rc -ne 0 && -n "$IL_CUR_STEP" ]]; then gui_mark step "$IL_CUR_STEP" fail; fi
+    gui_mark exit "$rc"
+}
 
 print_usage() {
     cat <<USAGE
@@ -130,7 +161,15 @@ check_macos() {
 # reuses it, so the password is the only prompt in the install phase.
 ensure_sudo() {
     print_step "Your Mac password"
-    if ! sudo -n true 2>/dev/null; then
+    if [[ "$IL_GUI" == 1 && -n "${SUDO_ASKPASS:-}" ]]; then
+        # The app asked for the password in its own window and answers sudo's
+        # askpass requests with it, here and in every later sudo (Homebrew's
+        # installer included), since there's no terminal to type into.
+        if ! sudo -A -v; then
+            print_error "That password didn't work. Click Try again in IL Setup."
+            exit 1
+        fi
+    elif ! sudo -n true 2>/dev/null; then
         echo ""
         echo -e "  ${BOLD}Type the password you use to log in to this Mac, then press Return.${NC}"
         echo "  Nothing appears on screen while you type. That's normal: keep typing."
@@ -144,7 +183,6 @@ ensure_sudo() {
     # Keep it fresh for the rest of the run so nothing asks again.
     ( while true; do sudo -n true 2>/dev/null; sleep 50; kill -0 "$$" 2>/dev/null || exit 0; done ) &
     SUDO_KEEPALIVE_PID=$!
-    trap 'if [[ -n "$SUDO_KEEPALIVE_PID" ]]; then kill "$SUDO_KEEPALIVE_PID" 2>/dev/null || true; fi' EXIT
 }
 
 # Install Apple's command line developer tools without Apple's popup. The
@@ -181,6 +219,7 @@ ensure_xcode_cli() {
 
     # Fallback: Apple's own installer window.
     print_warning "Couldn't install them automatically. Opening Apple's installer instead."
+    gui_mark expect devtools-popup
     print_info "Click Install in the window that appears, then wait. This window carries on by itself."
     xcode-select --install 2>/dev/null || true
     until xcode-select -p &>/dev/null; do
@@ -284,6 +323,9 @@ ensure_github_auth() {
     else
         # The old wording ("Opening browser...") hid that gh waits for Return
         # first; people waited, the code expired, and setup stopped (2026-09-28).
+        # In GUI mode gh has no terminal, so it prints the code and URL without
+        # waiting; the app shows the code large and opens the browser.
+        if [[ "$IL_GUI" != 1 ]]; then
         echo ""
         echo -e "  ${BOLD}Sign in to GitHub:${NC}"
         echo "   1. A code like ABCD-1234 appears below. Copy it. It's here in Terminal, not in your email."
@@ -291,13 +333,16 @@ ensure_github_auth() {
         echo "   3. Paste the code and click Authorize. This window carries on by itself."
         echo "   If no browser opens, go to github.com/login/device and paste the code there."
         echo ""
+        fi
 
         local attempt
         for attempt in 1 2 3; do
             if gh auth login --web --git-protocol https --hostname github.com; then
                 break
             fi
-            if [[ $attempt -lt 3 ]]; then
+            if [[ $attempt -lt 3 && "$IL_GUI" == 1 ]]; then
+                print_info "GitHub sign-in didn't finish. Getting a new code..."
+            elif [[ $attempt -lt 3 ]]; then
                 print_warning "GitHub sign-in didn't finish. Codes expire after 15 minutes."
                 printf "  Press Return to get a new code: " > /dev/tty
                 read -r _ < /dev/tty || true
@@ -939,6 +984,30 @@ $(all_repo_keys)
 EOF
     fi
 
+    # GUI mode: hand the list to the app and read its answer (comma-separated
+    # keys, or "none") from stdin.
+    if [[ "$IL_GUI" == 1 ]]; then
+        local list_json="[]" i
+        for i in "${!keys[@]}"; do
+            list_json="$(echo "$list_json" | jq -c --arg k "${keys[$i]}" --arg n "${names[$i]}" \
+                --arg d "${descs[$i]}" --arg s "${sizes[$i]:-}" --argjson first "$([[ $i -eq 0 ]] && echo true || echo false)" \
+                '. + [{key: $k, name: $n, description: $d, size: $s, default: $first}]')"
+        done
+        gui_mark ask repos "$list_json"
+        # The answer comes through a FIFO, not stdin: the app runs this script
+        # with stdin closed so no installer can block on a hidden question.
+        local reply=""
+        read -r reply < "${IL_SETUP_ANSWER_FIFO:-/dev/null}" || reply=""
+        [[ -z "$reply" || "$reply" == "none" ]] && return 0
+        FLAG_REPOS="$reply"
+        local IFS=','
+        local k
+        for k in $FLAG_REPOS; do
+            [[ -n "$(repo_field "$k" key)" ]] && SELECTED_KEYS+=("$k")
+        done
+        return 0
+    fi
+
     # Render the menu to the terminal (stdin is the piped script, so use /dev/tty).
     {
         echo ""
@@ -1024,6 +1093,10 @@ print_completion() {
         echo "  1. Use the NEW Terminal window that just opened. Type:  claude"
     fi
     echo ""
+    if [[ "$IL_GUI" == 1 ]]; then
+        gui_mark finished
+        return 0
+    fi
     # This window can't see the tools it just installed (a shell only reads its
     # settings when it starts), so hand people a fresh one instead of an error.
     open -a Terminal "$HOME" 2>/dev/null || true
@@ -1154,30 +1227,7 @@ write_il_path_block() {
 # Main
 # -----------------------------------------------------------------------------
 
-main() {
-    parse_args "$@"
-
-    echo ""
-    echo -e "${BOLD}Irrational Labs — Setup${NC}"
-    echo -e "This will install your dev tools, then ask which repos to clone."
-    echo ""
-
-    check_macos
-    ensure_sudo                 # the one password prompt, with instructions
-    ensure_xcode_cli
-    ensure_homebrew
-    ensure_early_tools          # step 3: git, git-lfs, gh, jq, bun
-    capture_prior_state         # record pre-setup git identity + gh auth state
-    ensure_github_auth          # step 4
-    ensure_git_identity
-    ensure_claude_code          # step 5: Claude available before anything that can fail
-    ensure_gws_keyring_env      # MUST precede any gws call — see the function comment
-    ensure_il_claude_plugins
-    ensure_gws_cli
-    load_manifest               # step 6
-    select_repos
-    install_shell_helpers       # step 7
-
+clone_selected_repos() {
     if [[ ${#SELECTED_KEYS[@]} -gt 0 ]]; then          # guard: bash 3.2 + set -u
         local k
         set +e
@@ -1188,12 +1238,37 @@ main() {
     else
         print_info "No repositories selected — base tools only"
     fi
+}
 
-    ensure_bb
+main() {
+    parse_args "$@"
+
+    echo ""
+    echo -e "${BOLD}Irrational Labs — Setup${NC}"
+    echo -e "This will install your dev tools, then ask which repos to clone."
+    echo ""
+
+    check_macos
+    trap il_on_exit EXIT
+    il_step password ensure_sudo            # the one password prompt, with instructions
+    il_step devtools ensure_xcode_cli
+    il_step homebrew ensure_homebrew
+    il_step tools    ensure_early_tools     # step 3: git, git-lfs, gh, jq, bun
+    capture_prior_state                     # record pre-setup git identity + gh auth state
+    il_step github   ensure_github_auth     # step 4
+    il_step identity ensure_git_identity
+    il_step claude   ensure_claude_code     # step 5: Claude available before anything that can fail
+    # The keyring guard MUST precede any gws call (see ensure_gws_keyring_env).
+    il_step gws      ensure_gws_keyring_env ensure_gws_cli
+    il_step plugins  ensure_il_claude_plugins
+    il_step repos    load_manifest select_repos install_shell_helpers clone_selected_repos   # steps 6-7
+    il_step bb       ensure_bb
 
     echo ""
     write_receipt               # persist what this run changed (for the uninstaller)
-    verify_setup || print_warning "Setup completed with some issues"
+    IL_CUR_STEP=verify; IL_STEP_WARNED=false; gui_mark step verify start
+    if verify_setup; then gui_mark step verify ok; else print_warning "Setup completed with some issues"; gui_mark step verify warn; fi
+    IL_CUR_STEP=""
     print_completion
 }
 
