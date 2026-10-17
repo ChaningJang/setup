@@ -898,6 +898,28 @@ ensure_claude_signin() {
     fi
 }
 
+# Slack, Figma and Granola as Claude connectors (spec:
+# ~/Assistant/docs/2026-10-17-il-setup-connectors.md). IL Setup.app checks
+# `claude mcp list`, offers Connect / Sign in per connector, and answers
+# "done" or "later" through the answer FIFO. Skippable: bb doesn't need them,
+# and IL Setup in bb keeps asking (its Finish-setup list).
+ensure_connectors() {
+    print_step "Connecting Slack, Figma and Granola..."
+    if ! claude_signed_in; then
+        print_warning "Sign in to Claude first; IL Setup in bb offers these connectors again"
+        return 0
+    fi
+    gui_mark ask connectors
+    local reply=""
+    read -r reply < "${IL_SETUP_ANSWER_FIFO:-/dev/null}" || reply=""
+    if [[ "$reply" == "done" ]]; then
+        print_success "Slack, Figma and Granola connected"
+    else
+        print_warning "Slack, Figma and Granola not connected yet. IL Setup in bb has a Connect button for each."
+        WARNINGS+=("Slack, Figma and Granola: connect them from IL Setup in bb when you're ready")
+    fi
+}
+
 google_signed_in() {
     command_exists gws && gws auth status 2>/dev/null \
         | jq -e '(.encrypted_credentials_exists or .plain_credentials_exists) and ((.scope_count // 0) > 0)' >/dev/null 2>&1
@@ -1441,6 +1463,7 @@ main() {
     il_step repos    load_manifest select_repos install_shell_helpers clone_selected_repos   # steps 6-7
     if [[ "$IL_GUI" == 1 ]]; then
         il_step claude-signin ensure_claude_signin
+        il_step connectors    ensure_connectors
         il_step google-signin ensure_google_signin
     fi
     il_step apps     ensure_everyday_apps
