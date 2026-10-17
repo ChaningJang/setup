@@ -1018,8 +1018,8 @@ print_completion() {
     echo ""
     echo -e "${BOLD}Next steps:${NC}"
     if [[ -d "$BB_APP" ]]; then
-        echo "  1. Go to bb (it's open). Click IL Setup in the left sidebar."
-        echo "  2. Finish the sign-ins there: Claude, then Google."
+        echo "  1. Go to bb (it's open). Follow \"Start here\" on its home screen."
+        echo "  2. It sends you to IL Setup for the sign-ins (Claude, then Google), then to your repos."
     else
         echo "  1. Use the NEW Terminal window that just opened. Type:  claude"
     fi
