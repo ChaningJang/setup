@@ -1051,7 +1051,7 @@ ensure_il_claude_md() {
         return 0
     fi
     local file="$HOME/.claude/CLAUDE.md" tmpl block state tmp
-    tmpl="$(load_claude_md_template)"
+    tmpl="$(load_claude_md_template || true)"
     if [[ "$tmpl" != *"$IL_MD_BEGIN"* || "$tmpl" != *"$IL_MD_END"* ]]; then
         print_warning "Couldn't load IL's instructions for Claude; skipping"
         WARNINGS+=("IL instructions for Claude not written: re-run this command")
@@ -1061,7 +1061,10 @@ ensure_il_claude_md() {
     mkdir -p "$HOME/.claude"
 
     if [[ ! -e "$file" ]]; then
-        printf '%s\n' "$block" > "$file"
+        printf '%s\n' "$block" > "$file" 2>/dev/null || {
+            print_warning "Couldn't write ~/.claude/CLAUDE.md; skipping IL's instructions"
+            return 0
+        }
         IL_CLAUDE_MD_CREATED=true; IL_CLAUDE_MD_WRITTEN=true
         print_success "IL instructions added to ~/.claude/CLAUDE.md"
         return 0
@@ -1081,7 +1084,7 @@ ensure_il_claude_md() {
             return 0
         fi
         backup_claude_md "$file"
-        printf '\n%s\n' "$block" >> "$file"
+        printf '\n%s\n' "$block" >> "$file" || { print_warning "Couldn't write ~/.claude/CLAUDE.md"; return 0; }
         IL_CLAUDE_MD_WRITTEN=true
         print_success "IL instructions added to ~/.claude/CLAUDE.md (your own text is unchanged)"
         return 0
@@ -1127,9 +1130,9 @@ HOME_CONFIG="$HOME/.config/il-setup/home.json"
 
 home_repo_candidate() {
     local first last base
-    first="$(git config --global user.name 2>/dev/null | awk '{print tolower($1)}' | tr -cd 'a-z0-9-')"
-    last="$(git config --global user.name 2>/dev/null | awk 'NF>1{print tolower($NF)}' | tr -cd 'a-z0-9-')"
-    [[ -n "$first" ]] || first="$(gh api user -q .login 2>/dev/null | tr 'A-Z' 'a-z')"
+    first="$(git config --global user.name 2>/dev/null | awk '{print tolower($1)}' | tr -cd 'a-z0-9-' || true)"
+    last="$(git config --global user.name 2>/dev/null | awk 'NF>1{print tolower($NF)}' | tr -cd 'a-z0-9-' || true)"
+    [[ -n "$first" ]] || first="$(gh api user -q .login 2>/dev/null | tr 'A-Z' 'a-z' || true)"
     base="home-${first:-me}"
     if gh repo view "$IL_ORG/$base" >/dev/null 2>&1 && [[ -n "$last" ]]; then
         base="home-$first-$last"
@@ -1140,9 +1143,9 @@ home_repo_candidate() {
 ensure_home_repo() {
     print_step "Your personal home repo..."
     if [[ -f "$HOME_CONFIG" ]] && command_exists jq; then
-        local have; have="$(jq -r '.repo // empty' "$HOME_CONFIG" 2>/dev/null)"
+        local have; have="$(jq -r '.repo // empty' "$HOME_CONFIG" 2>/dev/null || true)"
         if [[ -n "$have" ]]; then
-            print_success "Home repo: $have ($(jq -r '.path // ""' "$HOME_CONFIG"))"
+            print_success "Home repo: $have ($(jq -r '.path // ""' "$HOME_CONFIG" 2>/dev/null || true))"
             return 0
         fi
     fi
@@ -1154,7 +1157,9 @@ ensure_home_repo() {
     fi
     candidate="$(home_repo_candidate)"
     if [[ -z "$answer" ]]; then
-        if [[ ! -r /dev/tty ]]; then
+        # No terminal (IL Setup.app, CI): skip rather than create anything
+        # unasked. The app passes IL_SETUP_HOME once it asks in its own window.
+        if [[ "${IL_SETUP_GUI:-}" == 1 ]] || ! { : < /dev/tty; } 2>/dev/null; then
             print_info "Skipped (no terminal to ask in; re-run with --home new)"
             return 0
         fi
@@ -1167,7 +1172,7 @@ ensure_home_repo() {
             echo "  0) Skip for now"
             printf "Choice: "
         } > /dev/tty
-        read -r answer < /dev/tty || answer=""
+        read -r answer < /dev/tty || answer=skip
         [[ -z "$answer" || "$answer" == 1 ]] && answer=new
         [[ "$answer" == 0 ]] && answer=skip
         if [[ "$answer" == 2 ]]; then
@@ -1232,7 +1237,7 @@ ensure_home_repo() {
 seed_home_repo() {
     local path="$1" slug="$2" first today
     git -C "$path" rev-parse --verify HEAD >/dev/null 2>&1 && return 0
-    first="$(git config --global user.name 2>/dev/null | awk '{print $1}')"; first="${first:-My}"
+    first="$(git config --global user.name 2>/dev/null | awk '{print $1}' || true)"; first="${first:-My}"
     today="$(date +%F)"
     mkdir -p "$path/memory"
     cat > "$path/README.md" <<MD
