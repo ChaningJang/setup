@@ -51,6 +51,7 @@ EMBEDDED_REPOS_JSON='{"repos":[{"key":"hq","name":"Irrational Labs HQ","slug":"I
 IL_GUI="${IL_SETUP_GUI:-}"
 IL_CUR_STEP=""         # checklist step now running (GUI mode)
 IL_STEP_WARNED=false   # a warning was printed during that step
+IL_STEP_SKIPPED=false  # the person chose "Skip for now" (shown amber, listed at the end)
 
 # Runtime state
 FLAG_REPOS=""          # comma-separated repo keys, or empty
@@ -102,11 +103,25 @@ gui_mark() { if [[ "$IL_GUI" == 1 ]]; then echo "::il:: $*"; fi; return 0; }
 # failure exits through il_on_exit, which marks the step failed.
 il_step() {
     local id="$1" fn; shift
-    IL_CUR_STEP="$id"; IL_STEP_WARNED=false
+    IL_CUR_STEP="$id"; IL_STEP_WARNED=false; IL_STEP_SKIPPED=false
     gui_mark step "$id" start
     for fn in "$@"; do "$fn"; done
-    if [[ "$IL_STEP_WARNED" == true ]]; then gui_mark step "$id" warn; else gui_mark step "$id" ok; fi
+    if [[ "$IL_STEP_SKIPPED" == true ]]; then gui_mark step "$id" skip
+    elif [[ "$IL_STEP_WARNED" == true ]]; then gui_mark step "$id" warn
+    else gui_mark step "$id" ok; fi
     IL_CUR_STEP=""
+}
+
+# IL Setup.app's "Skip for now" on a step that runs a command (GitHub, Google):
+# the app writes the step id into IL_SETUP_SKIP_FILE and stops the command.
+gui_skip_requested() {
+    [[ "$IL_GUI" == 1 && -n "${IL_SETUP_SKIP_FILE:-}" && -f "$IL_SETUP_SKIP_FILE" ]] \
+        && grep -qx "$1" "$IL_SETUP_SKIP_FILE" 2>/dev/null
+}
+
+step_skipped() {
+    IL_STEP_SKIPPED=true
+    print_info "Skipped for now. Finish it later in IL Setup (bb sidebar)."
 }
 
 il_on_exit() {
@@ -337,12 +352,17 @@ ensure_github_auth() {
         echo ""
         fi
 
-        local attempt
-        for attempt in 1 2 3; do
+        local attempt attempts=3
+        [[ "$IL_GUI" == 1 ]] && attempts=6   # the app's Retry stops gh to get a new code
+        for attempt in $(seq 1 $attempts); do
             if gh auth login --web --git-protocol https --hostname github.com; then
                 break
             fi
-            if [[ $attempt -lt 3 && "$IL_GUI" == 1 ]]; then
+            if gui_skip_requested github; then
+                step_skipped
+                return 0
+            fi
+            if [[ $attempt -lt $attempts && "$IL_GUI" == 1 ]]; then
                 print_info "GitHub sign-in didn't finish. Getting a new code..."
             elif [[ $attempt -lt 3 ]]; then
                 print_warning "GitHub sign-in didn't finish. Codes expire after 15 minutes."
@@ -354,6 +374,9 @@ ensure_github_auth() {
 
         if gh auth status &>/dev/null; then
             print_success "GitHub authentication successful"
+        elif [[ "$IL_GUI" == 1 ]]; then
+            print_warning "GitHub sign-in didn't finish. Repos and IL's plugins need it: run IL Setup again."
+            WARNINGS+=("GitHub sign-in not finished: open IL Setup again to retry")
         else
             print_error "GitHub authentication failed"
             print_info "Please try running: gh auth login"
@@ -836,12 +859,33 @@ ensure_everyday_apps() {
         print_warning "Homebrew isn't available, so the apps were skipped"
         return 0
     fi
-    local entry cask app name
+    local entry cask app name chosen="${IL_SETUP_APPS:-all}"
+    # GUI mode: the app shows the four as checkboxes (installed ones greyed) and
+    # answers with the casks to install, or "none".
+    if [[ "$IL_GUI" == 1 ]]; then
+        local list_json="[]" installed
+        for entry in "${IL_APPS[@]}"; do
+            cask="${entry%%|*}"; app="${entry#*|}"; name="$(app_display_name "$app")"
+            installed=false
+            [[ -d "/Applications/$app.app" || -d "$HOME/Applications/$app.app" ]] && installed=true
+            list_json="$(echo "$list_json" | jq -c --arg c "$cask" --arg n "$name" --argjson i "$installed" \
+                '. + [{cask: $c, name: $n, installed: $i}]')"
+        done
+        gui_mark ask apps "$list_json"
+        read -r chosen < "${IL_SETUP_ANSWER_FIFO:-/dev/null}" || chosen=""
+        [[ -z "$chosen" ]] && chosen="none"
+    fi
     for entry in "${IL_APPS[@]}"; do
         cask="${entry%%|*}"; app="${entry#*|}"; name="$(app_display_name "$app")"
         if [[ -d "/Applications/$app.app" || -d "$HOME/Applications/$app.app" ]]; then
             print_success "$name already installed"
             gui_mark app "$cask" ok "$name"
+            continue
+        fi
+        # IL_SETUP_APPS (or the app's answer): "all", "none", or casks like "slack,zoom".
+        if [[ "$chosen" != "all" && ",$chosen," != *",$cask,"* ]]; then
+            print_info "$name skipped (your choice)"
+            gui_mark app "$cask" skip "$name"
             continue
         fi
         gui_mark app "$cask" start "$name"
@@ -882,16 +926,18 @@ ensure_claude_signin() {
         print_success "Already signed in to Claude"
         return 0
     fi
+    # The app runs `claude auth login` itself, on a terminal it owns: the
+    # browser hands back through localhost, and if someone lands on Claude's
+    # "paste this code" page the app types the code in. (Run from here, with no
+    # stdin, the code page was a dead end: Chaning's run, 2026-10-17.)
     print_info "Your browser opens Claude's sign-in page. Sign in with your IL account and approve."
-    gui_mark expect browser claude
-    local attempt
-    for attempt in 1 2; do
-        claude auth login --claudeai </dev/null && break
-        claude_signed_in && break
-        [[ $attempt -lt 2 ]] && print_info "Sign-in didn't finish. Opening it again..."
-    done
+    gui_mark ask claude-login
+    local reply=""
+    read -r reply < "${IL_SETUP_ANSWER_FIFO:-/dev/null}" || reply=""
     if claude_signed_in; then
         print_success "Signed in to Claude"
+    elif [[ "$reply" == "skip" ]]; then
+        step_skipped
     else
         print_warning "Claude sign-in didn't finish. Finish it in IL Setup in bb."
         WARNINGS+=("Claude sign-in not finished: use IL Setup in bb, or run IL Setup again")
@@ -915,8 +961,7 @@ ensure_connectors() {
     if [[ "$reply" == "done" ]]; then
         print_success "Slack, Figma and Granola connected"
     else
-        print_warning "Slack, Figma and Granola not connected yet. IL Setup in bb has a Connect button for each."
-        WARNINGS+=("Slack, Figma and Granola: connect them from IL Setup in bb when you're ready")
+        step_skipped
     fi
 }
 
@@ -951,7 +996,17 @@ ensure_google_signin() {
     fi
     print_info "Your browser opens Google's sign-in page. Use your @irrationallabs.com account and click Allow."
     gui_mark expect browser google
-    bash "$tmp/auth-setup.sh" </dev/null || true
+    local attempt
+    for attempt in 1 2 3; do
+        bash "$tmp/auth-setup.sh" </dev/null || true
+        google_signed_in && break
+        if gui_skip_requested google-signin; then
+            rm -rf "$tmp"
+            step_skipped
+            return 0
+        fi
+        [[ "$IL_GUI" == 1 ]] || break   # only the app's Retry starts it again
+    done
     rm -rf "$tmp"
     if google_signed_in; then
         print_success "Signed in to Google"
@@ -1194,7 +1249,10 @@ EOF
         # with stdin closed so no installer can block on a hidden question.
         local reply=""
         read -r reply < "${IL_SETUP_ANSWER_FIFO:-/dev/null}" || reply=""
-        [[ -z "$reply" || "$reply" == "none" ]] && return 0
+        if [[ -z "$reply" || "$reply" == "none" ]]; then
+            step_skipped
+            return 0
+        fi
         FLAG_REPOS="$reply"
         local IFS=','
         local k name

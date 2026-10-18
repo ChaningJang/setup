@@ -651,14 +651,18 @@ function Ensure-GwsCli {
 function Ensure-EverydayApps {
     Print-Step "Installing everyday apps (Slack, Zoom, Wispr Flow, Granola)..."
     $apps = @(
-        @{ Id = "SlackTechnologies.Slack"; Name = "Slack" },
-        @{ Id = "Zoom.Zoom";               Name = "Zoom" },
-        @{ Id = "WisprFlow.WisprFlow";     Name = "Wispr Flow" },
-        @{ Id = "Granola.Granola";         Name = "Granola" }
+        @{ Key = "slack";      Id = "SlackTechnologies.Slack"; Name = "Slack" },
+        @{ Key = "zoom";       Id = "Zoom.Zoom";               Name = "Zoom" },
+        @{ Key = "wispr-flow"; Id = "WisprFlow.WisprFlow";     Name = "Wispr Flow" },
+        @{ Key = "granola";    Id = "Granola.Granola";         Name = "Granola" }
     )
+    # IL_SETUP_APPS: "all" (default), "none", or keys like "slack,zoom" (same keys as the Mac casks).
+    $chosen = if ($env:IL_SETUP_APPS) { $env:IL_SETUP_APPS } else { "all" }
+    $chosenKeys = @($chosen -split "," | ForEach-Object { $_.Trim() })
     foreach ($app in $apps) {
         winget list --id $app.Id -e --accept-source-agreements 2>$null | Out-Null
         if ($LASTEXITCODE -eq 0) { Print-Success "$($app.Name) already installed"; continue }
+        if ($chosen -ne "all" -and -not ($chosenKeys -contains $app.Key)) { Print-Info "$($app.Name) skipped (your choice)"; continue }
         Print-Info "Installing $($app.Name)..."
         winget install --id $app.Id -e --silent --accept-source-agreements --accept-package-agreements 2>$null | Out-Null
         winget list --id $app.Id -e 2>$null | Out-Null
