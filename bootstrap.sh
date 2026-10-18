@@ -1185,8 +1185,9 @@ EOF
         local list_json="[]" i
         for i in "${!keys[@]}"; do
             list_json="$(echo "$list_json" | jq -c --arg k "${keys[$i]}" --arg n "${names[$i]}" \
-                --arg d "${descs[$i]}" --arg s "${sizes[$i]:-}" --argjson first "$([[ $i -eq 0 ]] && echo true || echo false)" \
-                '. + [{key: $k, name: $n, description: $d, size: $s, default: $first}]')"
+                --arg d "${descs[$i]}" --arg s "${sizes[$i]:-}" --arg slug "$(repo_field "${keys[$i]}" slug)" \
+                --argjson first "$([[ $i -eq 0 ]] && echo true || echo false)" \
+                '. + [{key: $k, name: $n, description: $d, size: $s, slug: $slug, default: $first}]')"
         done
         gui_mark ask repos "$list_json"
         # The answer comes through a FIFO, not stdin: the app runs this script
@@ -1196,9 +1197,19 @@ EOF
         [[ -z "$reply" || "$reply" == "none" ]] && return 0
         FLAG_REPOS="$reply"
         local IFS=','
-        local k
+        local k name
         for k in $FLAG_REPOS; do
-            [[ -n "$(repo_field "$k" key)" ]] && SELECTED_KEYS+=("$k")
+            if [[ "$k" == gh:* ]]; then
+                # Any IL repo the person can see, from the app's "Show more"
+                # (gh repo list IrrationalLabs-team): set up like a generic repo.
+                name="${k#gh:}"
+                [[ "$name" =~ ^[A-Za-z0-9._-]+$ ]] || continue
+                REPOS_JSON="$(echo "$REPOS_JSON" | jq -c --arg k "$k" --arg n "$name" \
+                    '.repos += [{key: $k, name: $n, slug: ("IrrationalLabs-team/" + $n), dir: $n, setup: "generic"}]')"
+                SELECTED_KEYS+=("$k")
+            elif [[ -n "$(repo_field "$k" key)" ]]; then
+                SELECTED_KEYS+=("$k")
+            fi
         done
         return 0
     fi
