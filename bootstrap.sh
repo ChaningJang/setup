@@ -18,6 +18,18 @@ set -euo pipefail
 SETUP_RAW_BASE="https://raw.githubusercontent.com/ChaningJang/setup/main"
 LFS_MIN_SIZE=1000
 
+# ---- Security minimums -------------------------------------------------------
+# Re-running setup upgrades anything Homebrew manages that is below these.
+# For the next advisory, edit this block and nothing else.
+#   Node: 21 Oct 2026 security release (CVE-2026-111497 Brotli RCE + 9 more).
+#         One fixed version per supported line; any older line is end-of-life.
+#   pip, certifi: eMudhra CA compromise (Oct 2026). Homebrew's Python (pulled
+#         in by yt-dlp) bundles pip; certifi is its own formula.
+SECURITY_MIN_NODE="22.23.4 24.22.1 26.12.1"
+SECURITY_MIN_PIP="26.2.2"
+SECURITY_MIN_CERTIFI="2026.10.19"
+BB_APP="/Applications/bb.app"
+
 # Minimal fallback manifest if repos.json can't be fetched (offline / local run).
 EMBEDDED_REPOS_JSON='{"repos":[{"key":"hq","name":"Irrational Labs HQ","slug":"IrrationalLabs-team/irrational_labs_hq","dir":"irrational_labs_hq","setup":"hq","default":true,"description":"Main workspace"}]}'
 
@@ -152,6 +164,81 @@ ensure_homebrew() {
     # Ensure brew is in PATH for this session
     if [[ -f "/opt/homebrew/bin/brew" ]]; then
         eval "$(/opt/homebrew/bin/brew shellenv)"
+    fi
+}
+
+# version_lt A B: true if dotted version A is lower than B (e.g. 24.9.0 < 24.22.1).
+version_lt() {
+    local IFS=. i x y
+    local -a a=(${1%%_*}) b=(${2%%_*})
+    for i in 0 1 2 3; do
+        x="${a[$i]:-0}"; x="${x//[^0-9]/}"; x=$((10#${x:-0}))
+        y="${b[$i]:-0}"; y="${y//[^0-9]/}"; y=$((10#${y:-0}))
+        [[ $x -lt $y ]] && return 0
+        [[ $x -gt $y ]] && return 1
+    done
+    return 1
+}
+
+# node_is_insecure <version>: true if that Node line is end-of-life or below its fix.
+node_is_insecure() {
+    local major="${1%%.*}" min newest=0
+    for min in $SECURITY_MIN_NODE; do
+        [[ "${min%%.*}" == "$major" ]] && { version_lt "$1" "$min"; return; }
+        [[ ${min%%.*} -gt $newest ]] && newest=${min%%.*}
+    done
+    [[ $major -lt $newest ]]
+}
+
+# Runs on every invocation, so re-running setup brings an existing Mac up to
+# the minimums above. Only upgrades formulae Homebrew already has; installs nothing.
+ensure_security_minimums() {
+    print_step "Checking security updates..."
+    local prefix to_upgrade=() v f py brew_node=""
+    prefix="$(brew --prefix)"
+
+    if brew list node &>/dev/null; then
+        brew_node="$prefix/opt/node/bin/node"
+        v="$("$brew_node" --version 2>/dev/null || true)"; v="${v#v}"
+        if [[ -n "$v" ]] && node_is_insecure "$v"; then to_upgrade+=("node"); fi
+    fi
+    # Node from somewhere else (nvm, the nodejs.org installer): not ours to change.
+    if command_exists node && ! [[ -n "$brew_node" && "$(command -v node)" -ef "$brew_node" ]]; then
+        v="$(node --version 2>/dev/null || true)"; v="${v#v}"
+        if [[ -n "$v" ]] && node_is_insecure "$v"; then
+            print_warning "Your Node $v ($(command -v node)) is missing security fixes and wasn't installed by Homebrew, so setup left it alone. Update it the way you installed it, to ${SECURITY_MIN_NODE// / or } or newer."
+            WARNINGS+=("Node $v at $(command -v node) needs a security update (${SECURITY_MIN_NODE// / or } or newer)")
+        fi
+    fi
+
+    if brew list certifi &>/dev/null; then
+        v="$(brew list --versions certifi | awk '{print $NF}')"
+        if version_lt "$v" "$SECURITY_MIN_CERTIFI"; then to_upgrade+=("certifi"); fi
+    fi
+    for f in $(brew list --formula -1 2>/dev/null | grep '^python@3\.' || true); do
+        py="$prefix/opt/$f/bin/python${f#python@}"
+        v="$("$py" -m pip --version 2>/dev/null | awk '{print $2}' || true)"
+        if [[ -n "$v" ]] && version_lt "$v" "$SECURITY_MIN_PIP"; then to_upgrade+=("$f"); fi
+    done
+
+    if [[ ${#to_upgrade[@]} -eq 0 ]]; then
+        print_success "Security updates: up to date"
+        return 0
+    fi
+    print_info "Updating: ${to_upgrade[*]}"
+    if HOMEBREW_NO_ASK=1 brew upgrade "${to_upgrade[@]}"; then
+        hash -r 2>/dev/null || true
+        print_success "Security updates installed"
+    else
+        print_warning "Some security updates failed"
+        WARNINGS+=("Security updates failed: run  brew upgrade ${to_upgrade[*]}")
+        return 0
+    fi
+    # bb's background services start workers with the Node they were launched
+    # with (an old Homebrew Cellar path), so new bb sessions fail until bb restarts.
+    if [[ " ${to_upgrade[*]} " == *" node "* && -d "$BB_APP" ]]; then
+        print_warning "Quit and reopen bb so it picks up the new Node."
+        WARNINGS+=("Quit and reopen bb so it picks up the new Node.")
     fi
 }
 
@@ -963,6 +1050,7 @@ main() {
     check_macos
     ensure_xcode_cli
     ensure_homebrew
+    ensure_security_minimums    # every run: upgrade Homebrew's node/python/certifi if below the minimums
     ensure_early_tools          # step 3: git, git-lfs, gh, jq, bun
     capture_prior_state         # record pre-setup git identity + gh auth state
     ensure_github_auth          # step 4
