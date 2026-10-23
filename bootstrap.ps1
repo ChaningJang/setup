@@ -21,6 +21,17 @@ $ErrorActionPreference = "Stop"
 # -----------------------------------------------------------------------------
 $SETUP_RAW_BASE = "https://raw.githubusercontent.com/ChaningJang/setup/main"
 $LFS_MIN_SIZE   = 1000
+
+# ---- Security minimums -------------------------------------------------------
+# Re-running setup upgrades the winget-managed Node if it is below these.
+# For the next advisory, edit this block and nothing else (same as bootstrap.sh).
+#   Node: 21 Oct 2026 security release (CVE-2026-111497 Brotli RCE + 9 more).
+#         One fixed version per supported line; any older line is end-of-life.
+#   pip, certifi (eMudhra CA compromise): nothing to do on Windows, because
+#         this script doesn't install Python.
+$SECURITY_MIN_NODE       = @("22.23.4", "24.22.1", "26.12.1")
+$SECURITY_NODE_WINGET_IDS = @("OpenJS.NodeJS", "OpenJS.NodeJS.LTS")
+
 $EMBEDDED_REPOS_JSON = '{"repos":[{"key":"hq","name":"Irrational Labs HQ","slug":"IrrationalLabs-team/irrational_labs_hq","dir":"irrational_labs_hq","setup":"hq","default":true,"description":"Main workspace"}]}'
 
 $script:ReposJson    = $null
@@ -166,6 +177,119 @@ function Ensure-Winget {
     }
 }
 
+# Test-VersionLt A B: true if dotted version A is lower than B (24.9.0 < 24.22.1).
+function Test-VersionLt([string]$A, [string]$B) {
+    $pa = @($A.TrimStart("v") -split "\.")
+    $pb = @($B.TrimStart("v") -split "\.")
+    for ($i = 0; $i -lt 4; $i++) {
+        $x = 0; $y = 0
+        if ($i -lt $pa.Count) { [void][int]::TryParse(($pa[$i] -replace "[^0-9]", ""), [ref]$x) }
+        if ($i -lt $pb.Count) { [void][int]::TryParse(($pb[$i] -replace "[^0-9]", ""), [ref]$y) }
+        if ($x -lt $y) { return $true }
+        if ($x -gt $y) { return $false }
+    }
+    return $false
+}
+
+# Test-NodeInsecure <version>: true if that Node line is end-of-life or below its fix.
+function Test-NodeInsecure([string]$Version) {
+    $major = 0; [void][int]::TryParse(($Version.TrimStart("v") -split "\.")[0], [ref]$major)
+    $newest = 0
+    foreach ($min in $SECURITY_MIN_NODE) {
+        $m = [int](($min -split "\.")[0])
+        if ($m -eq $major) { return (Test-VersionLt $Version $min) }
+        if ($m -gt $newest) { $newest = $m }
+    }
+    return ($major -lt $newest)
+}
+
+function Get-NodeVersion([string]$Exe) {
+    $v = $null
+    try { $v = & $Exe --version 2>$null | Select-Object -First 1 } catch {}
+    if ($v) { return ([string]$v).Trim().TrimStart("v") }
+    return ""
+}
+
+# The folder the Node.js installer put node.exe in (winget runs the same
+# installer as nodejs.org). Not nvm-windows' symlink, which can sit at the same path.
+function Get-NodeInstallerDir {
+    foreach ($root in @("HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall",
+                        "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall")) {
+        $hit = Get-ChildItem $root -ErrorAction SilentlyContinue |
+            ForEach-Object { Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue } |
+            Where-Object { $_.DisplayName -match '^Node\.js' -and $_.InstallLocation -and (Test-Path (Join-Path $_.InstallLocation "node.exe")) } |
+            Select-Object -First 1
+        if ($hit) { return $hit.InstallLocation.TrimEnd("\") }
+    }
+    if ($env:ProgramFiles) {
+        $dir = Join-Path $env:ProgramFiles "nodejs"
+        $item = Get-Item $dir -ErrorAction SilentlyContinue
+        if ($item -and -not ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -and (Test-Path (Join-Path $dir "node.exe"))) { return $dir }
+    }
+    return $null
+}
+
+# The winget package id that manages the installed Node, or $null.
+function Get-WingetNodeId {
+    foreach ($id in $SECURITY_NODE_WINGET_IDS) {
+        # Exit code only: winget truncates its table columns in a narrow window.
+        winget list --id $id -e --accept-source-agreements 2>$null | Out-Null
+        if ($LASTEXITCODE -eq 0) { return $id }
+    }
+    return $null
+}
+
+function Test-BbInstalled { return (Test-Path (Join-Path $env:LOCALAPPDATA "Programs\bb\bb.exe")) }
+
+# Runs on every invocation, so re-running setup brings an existing PC up to the
+# minimums above. Only upgrades a Node that winget manages; installs nothing.
+function Ensure-SecurityMinimums {
+    $ErrorActionPreference = "Continue"   # winget/node write to stderr; this scope only
+    Print-Step "Checking security updates..."
+    $minText = $SECURITY_MIN_NODE -join " or "
+    $wingetDir = $null; $id = $null; $toUpgrade = $null
+
+    $dir = Get-NodeInstallerDir
+    if ($dir) { $id = Get-WingetNodeId }
+    if ($id) {
+        $wingetDir = $dir
+        $v = Get-NodeVersion (Join-Path $dir "node.exe")
+        if ($v -and (Test-NodeInsecure $v)) { $toUpgrade = $v }
+    }
+    # Node from somewhere else (nvm-windows, a manual install): not ours to change.
+    $cmd = Get-Command node -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($cmd -and -not ($wingetDir -and ((Split-Path $cmd.Source) -ieq $wingetDir))) {
+        $v = Get-NodeVersion $cmd.Source
+        if ($v -and (Test-NodeInsecure $v)) {
+            Print-Warning "Your Node $v ($($cmd.Source)) is missing security fixes and wasn't installed by winget, so setup left it alone. Update it the way you installed it, to $minText or newer."
+            $script:Warnings += "Node $v at $($cmd.Source) needs a security update ($minText or newer)"
+        }
+    }
+
+    if (-not $toUpgrade) {
+        Print-Success "Security updates: up to date"
+        return
+    }
+    Print-Info "Updating: Node $toUpgrade ($id)"
+    winget upgrade --id $id -e --accept-source-agreements --accept-package-agreements
+    Refresh-Path   # winget changes the machine PATH, not this window's
+    $now = Get-NodeVersion (Join-Path $wingetDir "node.exe")
+    if (-not $now -or (Test-NodeInsecure $now)) {
+        Print-Warning "Some security updates failed"
+        $script:Warnings += "Security updates failed: run  winget upgrade --id $id -e"
+        return
+    }
+    Print-Success "Security updates installed (Node $now)"
+    # bb's command and background services run on this Node; they keep the old
+    # one until bb restarts.
+    if (Test-BbInstalled) {
+        Print-Warning "Quit and reopen bb so it picks up the new Node."
+        $script:Warnings += "Quit and reopen bb so it picks up the new Node."
+    }
+}
+
+# Scoop only supplies the optional shell helpers and HQ media tools, so it
+# never stops setup. Its installer refuses to run as Administrator.
 function Ensure-Scoop {
     Print-Step "Checking Scoop..."
 
@@ -768,6 +892,7 @@ function Main {
     Write-Host ""
 
     Ensure-Winget
+    Ensure-SecurityMinimums    # every run: upgrade winget's Node if below the minimums
     Ensure-Scoop
     Ensure-EarlyTools          # step 3
     Ensure-LongPaths           # Windows MAX_PATH fix — must precede any clone
