@@ -170,6 +170,7 @@ ensure_homebrew() {
 # version_lt A B: true if dotted version A is lower than B (e.g. 24.9.0 < 24.22.1).
 version_lt() {
     local IFS=. i x y
+    # shellcheck disable=SC2206  # intentional split on IFS=.
     local -a a=(${1%%_*}) b=(${2%%_*})
     for i in 0 1 2 3; do
         x="${a[$i]:-0}"; x="${x//[^0-9]/}"; x=$((10#${x:-0}))
