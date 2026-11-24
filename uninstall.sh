@@ -217,7 +217,7 @@ remove_dev_tools() {
         run_cmd brew uninstall "$f"
         print_success "Uninstalled $f"
     done
-    # Everyday apps (Slack, Zoom, Wispr Flow, Granola): only the casks setup itself installed.
+    # Everyday apps (Claude, Slack, Zoom, Figma, Loom, Wispr Flow, Granola): only the casks setup itself installed.
     local c
     while IFS= read -r c; do
         [[ -n "$c" ]] || continue

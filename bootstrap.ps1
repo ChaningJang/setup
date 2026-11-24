@@ -766,15 +766,18 @@ function Ensure-GwsCli {
 # auto-updates keep working and the plugin keeps its own update channel.
 # Windows bb (0.45+) is alpha and installs per user, no admin.
 
-# Everyday apps (Slack, Zoom, Wispr Flow, Granola), same rules as the Mac:
+# Everyday apps (Claude, Slack, Zoom, Figma, Loom, Wispr Flow, Granola), same rules as the Mac:
 # people sign in later on their own, nothing is launched, an app that's
 # already installed (by any route winget can see) counts as done, and a
 # failure warns and moves on. Ids we install go in the receipt like the tools.
 function Ensure-EverydayApps {
-    Print-Step "Installing everyday apps (Slack, Zoom, Wispr Flow, Granola)..."
+    Print-Step "Installing everyday apps (Claude, Slack, Zoom, Figma, Loom, Wispr Flow, Granola)..."
     $apps = @(
+        @{ Key = "claude";     Id = "Anthropic.Claude";        Name = "Claude" },
         @{ Key = "slack";      Id = "SlackTechnologies.Slack"; Name = "Slack" },
         @{ Key = "zoom";       Id = "Zoom.Zoom";               Name = "Zoom" },
+        @{ Key = "figma";      Id = "Figma.Figma";             Name = "Figma" },
+        @{ Key = "loom";       Id = "Loom.Loom";               Name = "Loom" },
         @{ Key = "wispr-flow"; Id = "WisprFlow.WisprFlow";     Name = "Wispr Flow" },
         @{ Key = "granola";    Id = "Granola.Granola";         Name = "Granola" }
     )

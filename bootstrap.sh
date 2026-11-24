@@ -138,6 +138,8 @@ step_skipped() {
 il_on_exit() {
     local rc=$?
     if [[ -n "$SUDO_KEEPALIVE_PID" ]]; then kill "$SUDO_KEEPALIVE_PID" 2>/dev/null || true; fi
+    stop_bb_prefetch
+    if [[ -n "$IL_BB_PREFETCH_DIR" ]]; then rm -rf "$IL_BB_PREFETCH_DIR"; fi
     if [[ $rc -ne 0 && -n "$IL_CUR_STEP" ]]; then gui_mark step "$IL_CUR_STEP" fail; fi
     gui_mark exit "$rc"
 }
@@ -770,12 +772,19 @@ ensure_claude_code() {
         print_info "PATH already includes ~/.local/bin in your shell profile"
     fi
 
-    # Final sanity check — fail loudly if claude still isn't resolvable.
+    # Final sanity check — fail loudly if claude still isn't resolvable, or is
+    # there but doesn't run (a green tick has to mean a working Claude Code).
     hash -r 2>/dev/null || true
     if ! command_exists claude; then
         print_error "claude installed but not found on PATH"
         print_info "Open a new terminal, or run: source ${profiles[0]}"
         WARNINGS+=("Claude Code installed but not yet on PATH — open a new terminal to use it")
+    elif ! claude --version </dev/null >/dev/null 2>&1; then
+        print_error "Claude Code is at $(command -v claude) but doesn't run"
+        print_info "Reinstall it: curl -fsSL https://claude.ai/install.sh | bash"
+        WARNINGS+=("Claude Code doesn't run: reinstall with  curl -fsSL https://claude.ai/install.sh | bash")
+    else
+        print_success "Claude Code $(claude --version </dev/null 2>/dev/null | head -1) (command line, used by bb)"
     fi
 }
 
@@ -930,24 +939,40 @@ ensure_gws_cli() {
 }
 
 # -----------------------------------------------------------------------------
-# Everyday apps: Slack, Zoom, Wispr Flow, Granola
+# Everyday apps: Claude, Slack, Zoom, Figma, Loom, Wispr Flow, Granola
 # -----------------------------------------------------------------------------
 # Installed with Homebrew casks; people sign in to them later on their own, so
 # nothing here launches them. An app already in /Applications (or
 # ~/Applications), however it got there, counts as done: never reinstall over
 # someone's copy. Failures warn and move on.
-IL_APPS=("slack|Slack" "zoom|zoom.us" "wispr-flow|Wispr Flow" "granola|Granola")
+# "claude" is the Claude desktop app (Claude Code's own step installs only the
+# command-line tool bb uses). Figma and Loom: Abigail's first run, 2026-11-22.
+IL_APPS=("claude|Claude" "slack|Slack" "zoom|zoom.us" "figma|Figma" "loom|Loom" "wispr-flow|Wispr Flow" "granola|Granola")
 
 app_display_name() { case "$1" in zoom.us) echo "Zoom" ;; *) echo "$1" ;; esac; }
 
+# Download the chosen casks side by side with Homebrew's own concurrent
+# downloader (one `brew fetch`, so no two brew processes race on its cache),
+# then `brew install` each from the cache. Best effort: a download that fails
+# here is retried by the install that follows. Older Homebrew ignores the
+# variable and downloads one after another, as before.
+fetch_casks_in_parallel() {
+    local entry casks=() names=()
+    for entry in "$@"; do casks+=("${entry%%|*}"); names+=("$(app_display_name "${entry#*|}")"); done
+    local list; list="$(printf '%s, ' "${names[@]}")"
+    print_info "Downloading ${list%, } at the same time..."
+    HOMEBREW_DOWNLOAD_CONCURRENCY=auto brew fetch --cask "${casks[@]}" </dev/null || true
+    print_info "Downloads finished; installing"
+}
+
 ensure_everyday_apps() {
-    print_step "Installing everyday apps (Slack, Zoom, Wispr Flow, Granola)..."
+    print_step "Installing everyday apps (Claude, Slack, Zoom, Figma, Loom, Wispr Flow, Granola)..."
     if ! command_exists brew; then
         print_warning "Homebrew isn't available, so the apps were skipped"
         return 0
     fi
     local entry cask app name chosen="${IL_SETUP_APPS:-all}"
-    # GUI mode: the app shows the four as checkboxes (installed ones greyed) and
+    # GUI mode: the app shows them as checkboxes (installed ones greyed) and
     # answers with the casks to install, or "none".
     if [[ "$IL_GUI" == 1 ]]; then
         local list_json="[]" installed
@@ -962,6 +987,9 @@ ensure_everyday_apps() {
         read -r chosen < "${IL_SETUP_ANSWER_FIFO:-/dev/null}" || chosen=""
         [[ -z "$chosen" ]] && chosen="none"
     fi
+    # Sort into done / skipped / to install, then download every app at once
+    # (Abigail's run: four apps one after another was the longest wait).
+    local to_install=()
     for entry in "${IL_APPS[@]}"; do
         cask="${entry%%|*}"; app="${entry#*|}"; name="$(app_display_name "$app")"
         if [[ -d "/Applications/$app.app" || -d "$HOME/Applications/$app.app" ]]; then
@@ -976,6 +1004,12 @@ ensure_everyday_apps() {
             continue
         fi
         gui_mark app "$cask" start "$name"
+        to_install+=("$entry")
+    done
+    [[ ${#to_install[@]} -eq 0 ]] && return 0
+    fetch_casks_in_parallel "${to_install[@]}"
+    for entry in "${to_install[@]}"; do
+        cask="${entry%%|*}"; app="${entry#*|}"; name="$(app_display_name "$app")"
         print_info "Installing $name..."
         if brew install --cask "$cask" </dev/null && [[ -d "/Applications/$app.app" || -d "$HOME/Applications/$app.app" ]]; then
             record_cask_installed "$cask"
@@ -1109,6 +1143,59 @@ ensure_google_signin() {
 # Official bb from its GitHub releases (checksum-verified), then the IL plugin
 # installed through bb's own CLI, so bb's auto-updates keep working and the
 # plugin keeps its own update channel.
+# bb (~190 MB) is installed last, but nothing stops it downloading early:
+# start_bb_prefetch runs right after the core tools, so the download overlaps
+# the GitHub, Claude and Google sign-ins (Abigail's run, 2026-11-22: about two
+# minutes of waiting on the bb step). ensure_bb still checks the SHA-512 from
+# the same manifest, and falls back to downloading itself if this didn't finish.
+IL_BB_PREFETCH_DIR=""
+IL_BB_PREFETCH_PID=""
+start_bb_prefetch() {
+    [[ "$(uname -m)" == "arm64" && ! -d "$BB_APP" ]] || return 0
+    IL_BB_PREFETCH_DIR="$(mktemp -d)" || return 0
+    (
+        trap - EXIT
+        set +e
+        base="https://github.com/get-bb/bb/releases/latest/download"
+        curl -fsSL -o "$IL_BB_PREFETCH_DIR/latest-mac.yml" "$base/latest-mac.yml" || exit 1
+        zip="$(awk '/^path:/{print $2}' "$IL_BB_PREFETCH_DIR/latest-mac.yml")"
+        [[ -n "$zip" && "$zip" != */* ]] || exit 1
+        curl -fsSL -o "$IL_BB_PREFETCH_DIR/$zip.part" "$base/$zip" || exit 1
+        mv "$IL_BB_PREFETCH_DIR/$zip.part" "$IL_BB_PREFETCH_DIR/$zip" && touch "$IL_BB_PREFETCH_DIR/done"
+    ) </dev/null >/dev/null 2>&1 &
+    IL_BB_PREFETCH_PID=$!
+}
+
+# finish_bb_prefetch [dir]: wait for the background download; with a dir, move
+# the manifest and zip into it and succeed if they're there. Always cleans up.
+finish_bb_prefetch() {
+    local into="${1:-}" ok=1 zip
+    [[ -n "$IL_BB_PREFETCH_DIR" ]] || return 1
+    if [[ -n "$IL_BB_PREFETCH_PID" ]]; then
+        if [[ -n "$into" ]] && kill -0 "$IL_BB_PREFETCH_PID" 2>/dev/null; then
+            print_info "Finishing bb's download (it started in the background earlier)..."
+        fi
+        if [[ -z "$into" ]]; then stop_bb_prefetch; fi
+        wait "$IL_BB_PREFETCH_PID" 2>/dev/null || true
+        IL_BB_PREFETCH_PID=""
+    fi
+    if [[ -n "$into" && -f "$IL_BB_PREFETCH_DIR/done" ]]; then
+        zip="$(awk '/^path:/{print $2}' "$IL_BB_PREFETCH_DIR/latest-mac.yml" 2>/dev/null || true)"
+        if [[ -n "$zip" && -f "$IL_BB_PREFETCH_DIR/$zip" ]] \
+           && mv "$IL_BB_PREFETCH_DIR/latest-mac.yml" "$IL_BB_PREFETCH_DIR/$zip" "$into/"; then
+            ok=0
+        fi
+    fi
+    rm -rf "$IL_BB_PREFETCH_DIR"; IL_BB_PREFETCH_DIR=""
+    return $ok
+}
+
+stop_bb_prefetch() {
+    [[ -n "$IL_BB_PREFETCH_PID" ]] || return 0
+    pkill -P "$IL_BB_PREFETCH_PID" 2>/dev/null || true
+    kill "$IL_BB_PREFETCH_PID" 2>/dev/null || true
+}
+
 ensure_bb() {
     print_step "Setting up bb..."
 
@@ -1120,24 +1207,33 @@ ensure_bb() {
 
     if [[ -d "$BB_APP" ]]; then
         print_success "bb already installed"
+        finish_bb_prefetch || true
     else
         local base="https://github.com/get-bb/bb/releases/latest/download"
-        local manifest zip want got tmp
-        if ! manifest="$(curl -fsSL "$base/latest-mac.yml")"; then
-            print_warning "Couldn't reach bb's download page; skipping bb"
-            WARNINGS+=("bb not installed: download failed. Re-run this command to retry.")
-            return 0
-        fi
-        zip="$(printf '%s\n' "$manifest" | awk '/^path:/{print $2}')"
-        want="$(printf '%s\n' "$manifest" | awk '/^sha512:/{print $2}')"
+        local manifest="" zip="" want got tmp
         tmp="$(mktemp -d)"
-        print_info "Downloading bb (about 190 MB)..."
-        if ! curl -fL --progress-bar -o "$tmp/$zip" "$base/$zip"; then
-            rm -rf "$tmp"
-            print_warning "bb download failed; skipping"
-            WARNINGS+=("bb not installed: download failed. Re-run this command to retry.")
-            return 0
+        # Use the copy start_bb_prefetch downloaded during the sign-ins, if it finished.
+        if finish_bb_prefetch "$tmp"; then
+            manifest="$(cat "$tmp/latest-mac.yml")"
+            zip="$(printf '%s\n' "$manifest" | awk '/^path:/{print $2}')"
+            print_success "bb was downloaded in the background"
+        else
+            if ! manifest="$(curl -fsSL "$base/latest-mac.yml")"; then
+                rm -rf "$tmp"
+                print_warning "Couldn't reach bb's download page; skipping bb"
+                WARNINGS+=("bb not installed: download failed. Re-run this command to retry.")
+                return 0
+            fi
+            zip="$(printf '%s\n' "$manifest" | awk '/^path:/{print $2}')"
+            print_info "Downloading bb (about 190 MB)..."
+            if ! curl -fL --progress-bar -o "$tmp/$zip" "$base/$zip"; then
+                rm -rf "$tmp"
+                print_warning "bb download failed; skipping"
+                WARNINGS+=("bb not installed: download failed. Re-run this command to retry.")
+                return 0
+            fi
         fi
+        want="$(printf '%s\n' "$manifest" | awk '/^sha512:/{print $2}')"
         got="$(shasum -a 512 "$tmp/$zip" | awk '{print $1}' | xxd -r -p | base64)"
         if [[ -z "$want" || "$got" != "$want" ]]; then
             rm -rf "$tmp"
@@ -1160,7 +1256,7 @@ ensure_bb() {
         ln -s "$BB_CLI" "$HOME/.local/bin/bb" && print_success "bb command available in new Terminal windows"
     fi
 
-    print_info "Opening bb..."
+    print_info "Opening bb and waiting for it to start..."
     open "$BB_APP"
     # Wait for bb's server, not just the app: `bb status` succeeds before the
     # server is listening, and a plugin install then fails with "Cannot connect
@@ -1196,6 +1292,7 @@ ensure_bb() {
     local entry
     for entry in $BB_DEFAULT_PLUGINS; do
         if ! "$BB_CLI" plugin list 2>/dev/null | grep -q "^${entry%@*}@"; then
+            print_info "Adding ${entry%@*} to bb..."
             if "$BB_CLI" plugin install "$entry" --yes >>/tmp/il-bb-plugin-install.log 2>&1; then
                 print_success "Added ${entry%@*} to bb"
             else
@@ -1609,6 +1706,7 @@ main() {
     il_step devtools ensure_xcode_cli
     il_step homebrew ensure_homebrew ensure_security_minimums   # every run: upgrade Homebrew's node/python/certifi if below the minimums
     il_step tools    ensure_early_tools     # step 3: git, git-lfs, gh, jq, bun
+    start_bb_prefetch                       # bb downloads during the sign-ins below, not at the end
     capture_prior_state                     # record pre-setup git identity + gh auth state
     il_step github   ensure_github_auth     # step 4
     il_step identity ensure_git_identity
